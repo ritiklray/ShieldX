@@ -1,7 +1,9 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'complaint_success_screen.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'ai_verification_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data Models
@@ -636,7 +638,7 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
     if (!confirmed || !mounted) return;
 
     setState(() => _isSubmitting = true);
-    await Future.delayed(const Duration(seconds: 2));
+    await Future.delayed(const Duration(milliseconds: 1200));
     if (!mounted) return;
     setState(() => _isSubmitting = false);
 
@@ -647,11 +649,12 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
     final officerId =
         'OFF${String.fromCharCodes(List.generate(3, (_) => 65 + rnd.nextInt(26)))}${rnd.nextInt(900) + 100}';
 
+    // Navigate to AI Verification step (step 3 of 4) before success screen
     Navigator.pushReplacement(
       context,
       PageRouteBuilder(
         transitionDuration: const Duration(milliseconds: 600),
-        pageBuilder: (_, __, ___) => ComplaintSuccessScreen(
+        pageBuilder: (_, __, ___) => AiVerificationScreen(
           complaintId: complaintId,
           officerId: officerId,
           category: widget.category,
@@ -850,6 +853,10 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
                                   ),
 
                                   const SizedBox(height: 8),
+
+                                  // AI Validation info section
+                                  _buildAiValidationInfoBanner(),
+                                  const SizedBox(height: 16),
 
                                   // Legal warning note
                                   _buildLegalNote(),
@@ -1395,16 +1402,135 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
     );
   }
 
+  Future<void> _showFilePickerBottomSheet(String fieldId) async {
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: _cardBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.only(bottom: 24, top: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: _borderColor,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Upload Document',
+              style: TextStyle(
+                color: _textPrimary,
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 16),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: _accentBlue.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.camera_alt_rounded,
+                  color: _accentBlue,
+                  size: 20,
+                ),
+              ),
+              title: const Text(
+                'Take Photo',
+                style: TextStyle(color: _textPrimary, fontSize: 14),
+              ),
+              onTap: () => Navigator.pop(context, 'camera'),
+            ),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: _shieldGreen.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.photo_library_rounded,
+                  color: _shieldGreen,
+                  size: 20,
+                ),
+              ),
+              title: const Text(
+                'Choose from Gallery',
+                style: TextStyle(color: _textPrimary, fontSize: 14),
+              ),
+              onTap: () => Navigator.pop(context, 'gallery'),
+            ),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: _accentOrange.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.insert_drive_file_rounded,
+                  color: _accentOrange,
+                  size: 20,
+                ),
+              ),
+              title: const Text(
+                'Upload Document (PDF/Doc)',
+                style: TextStyle(color: _textPrimary, fontSize: 14),
+              ),
+              onTap: () => Navigator.pop(context, 'document'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result == null) return;
+
+    String? fileName;
+
+    if (result == 'camera') {
+      final ImagePicker picker = ImagePicker();
+      final XFile? photo = await picker.pickImage(source: ImageSource.camera);
+      if (photo != null) {
+        fileName = photo.name;
+      }
+    } else if (result == 'gallery') {
+      final ImagePicker picker = ImagePicker();
+      final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+      if (image != null) {
+        fileName = image.name;
+      }
+    } else if (result == 'document') {
+      FilePickerResult? fileResult = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf', 'doc', 'docx'],
+      );
+      if (fileResult != null && fileResult.files.single.name.isNotEmpty) {
+        fileName = fileResult.files.single.name;
+      }
+    }
+
+    if (fileName != null && mounted) {
+      setState(() {
+        _uploadedFiles[fieldId] = fileName;
+      });
+    }
+  }
+
   Widget _buildFileUpload(FormFieldConfig field) {
     final uploaded = _uploadedFiles[field.id];
     return GestureDetector(
-      onTap: () {
-        // Simulate file pick
-        setState(() {
-          _uploadedFiles[field.id] =
-              '${field.label.replaceAll(' ', '_').toLowerCase()}_doc.pdf';
-        });
-      },
+      onTap: () => _showFilePickerBottomSheet(field.id),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         padding: const EdgeInsets.all(16),
@@ -1697,13 +1823,13 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
-                              Icons.send_rounded,
+                              Icons.document_scanner_rounded,
                               color: Colors.white,
                               size: 18,
                             ),
                             SizedBox(width: 8),
                             Text(
-                              'Submit Complaint',
+                              'Proceed to AI Verification',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 15,
@@ -1717,6 +1843,106 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ── AI Validation info banner ─────────────────────────────────────────────
+  Widget _buildAiValidationInfoBanner() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _accentBlue.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _accentBlue.withOpacity(0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: _accentBlue.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: _accentBlue.withOpacity(0.35)),
+                ),
+                child: const Icon(
+                  Icons.verified_user_rounded,
+                  color: _accentBlue,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'AI Document Validation',
+                      style: TextStyle(
+                        color: _textPrimary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Next step after submission',
+                      style: TextStyle(color: _textSecondary, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: _accentBlue.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: _accentBlue.withOpacity(0.35)),
+                ),
+                child: const Text(
+                  'Step 3',
+                  style: TextStyle(
+                    color: _accentBlue,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          const Divider(color: Color(0xFF1E2E52), height: 1),
+          const SizedBox(height: 12),
+          ...([
+            (
+              Icons.document_scanner_rounded,
+              'Document structure and consistency check',
+            ),
+            (
+              Icons.compare_arrows_rounded,
+              'Form data vs. document data comparison',
+            ),
+            (Icons.shield_rounded, 'Risk level assessment and badge'),
+          ].map(
+            (item) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Icon(item.$1, color: _accentBlue.withOpacity(0.7), size: 14),
+                  const SizedBox(width: 10),
+                  Text(
+                    item.$2,
+                    style: const TextStyle(color: _textSecondary, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          )),
         ],
       ),
     );

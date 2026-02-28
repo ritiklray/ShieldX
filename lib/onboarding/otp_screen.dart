@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../screens/checklist_screen.dart';
+import '../screens/ai_document_assistant_screen.dart';
 
 class OtpScreen extends StatefulWidget {
   final String phoneNumber;
@@ -167,7 +167,7 @@ class _OtpScreenState extends State<OtpScreen>
           context,
           PageRouteBuilder(
             transitionDuration: const Duration(milliseconds: 600),
-            pageBuilder: (_, __, ___) => const ChecklistScreen(),
+            pageBuilder: (_, __, ___) => const AiDocumentAssistantScreen(),
             transitionsBuilder: (_, animation, __, child) {
               return FadeTransition(
                 opacity: CurvedAnimation(
