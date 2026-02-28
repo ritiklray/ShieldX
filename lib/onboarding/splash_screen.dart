@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'login_screen.dart';
+import '../screens/dashboard_screen.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -97,14 +99,19 @@ class _SplashScreenState extends State<SplashScreen>
       }
     });
 
-    // Navigate to Login after 3.5 s
+    // Navigate after 3.5 s
     Future.delayed(const Duration(milliseconds: 3500), () {
       if (mounted) {
+        final user = FirebaseAuth.instance.currentUser;
+        final Widget nextScreen = user != null
+            ? const DashboardScreen()
+            : const LoginScreen();
+
         Navigator.pushReplacement(
           context,
           PageRouteBuilder(
             transitionDuration: const Duration(milliseconds: 600),
-            pageBuilder: (_, __, ___) => const LoginScreen(),
+            pageBuilder: (_, __, ___) => nextScreen,
             transitionsBuilder: (_, animation, __, child) {
               return FadeTransition(
                 opacity: CurvedAnimation(

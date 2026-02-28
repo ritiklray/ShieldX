@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../onboarding/login_screen.dart';
 import 'complaint_form_screen.dart';
 import 'officer_chat_screen.dart';
+import 'ai_guardian_screen.dart';
+import 'sos_screen.dart';
+import 'guardian_permission_dialog.dart';
 
 // ── Tab enum ──────────────────────────────────────────────────────────────────
 enum DashboardTab { file, track }
@@ -42,6 +48,9 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _isTracking = false;
   _TrackResult? _trackResult;
   String? _trackError;
+
+  // ── AI Guardian Protection ─────────────────────────────────────────────────
+  bool _guardianEnabled = false;
 
   // ── Colors ─────────────────────────────────────────────────────────────────
   static const Color _bg1 = Color(0xFF0A0F1E);
@@ -99,6 +108,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     super.initState();
     _activeTab = widget.initialTab;
     _trackCtrl = TextEditingController(text: widget.prefilledComplaintId);
+    _loadGuardianPreference();
 
     _entryCtrl = AnimationController(
       vsync: this,
@@ -117,6 +127,15 @@ class _DashboardScreenState extends State<DashboardScreen>
     _entryCtrl.dispose();
     _trackCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadGuardianPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _guardianEnabled = prefs.getBool('guardian_enabled') ?? false;
+      });
+    }
   }
 
   // ── Navigate to complaint form ─────────────────────────────────────────────
@@ -234,6 +253,49 @@ class _DashboardScreenState extends State<DashboardScreen>
     return '${now.day}/${now.month}/${now.year}  ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
   }
 
+  // ── SOS ───────────────────────────────────────────────────────────────────
+  void _onSOS() {
+    Navigator.push(
+      context,
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 450),
+        pageBuilder: (_, __, ___) => const SosScreen(),
+        transitionsBuilder: (_, animation, __, child) => SlideTransition(
+          position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
+              .animate(
+                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+              ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  // ── Open AI Guardian Dashboard ────────────────────────────────────────────
+  Future<void> _openGuardianDashboard() async {
+    final result = await Navigator.push<bool>(
+      context,
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 450),
+        pageBuilder: (_, __, ___) =>
+            AiGuardianScreen(initialEnabled: _guardianEnabled),
+        transitionsBuilder: (_, animation, __, child) => SlideTransition(
+          position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
+              .animate(
+                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+              ),
+          child: child,
+        ),
+      ),
+    );
+    // Sync guardian state back from screen
+    if (result != null && mounted) {
+      setState(() => _guardianEnabled = result);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('guardian_enabled', result);
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   //  BUILD
   // ─────────────────────────────────────────────────────────────────────────
@@ -299,6 +361,48 @@ class _DashboardScreenState extends State<DashboardScreen>
                 right: 0,
                 child: _buildFileBottomBar(),
               ),
+
+            // Floating buttons: AI + SOS  ← MUST be LAST in Stack (renders on top)
+            Positioned(
+              bottom: _activeTab == DashboardTab.file ? 100 : 24,
+              right: 18,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // AI Guardian button — navigates only when guardian is ON
+                  _FloatingActionBtn(
+                    icon: Icons.shield_rounded,
+                    label: 'AI',
+                    color: _guardianEnabled ? _shieldGreen : _textSecondary,
+                    onTap: () {
+                      if (_guardianEnabled) {
+                        _openGuardianDashboard();
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: const Text('Turn on AI Guardian first.'),
+                            backgroundColor: _accentBlue.withOpacity(0.9),
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            duration: const Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  // SOS button
+                  _FloatingActionBtn(
+                    icon: Icons.sos_rounded,
+                    label: 'SOS',
+                    color: const Color(0xFFFF4C6A),
+                    onTap: _onSOS,
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -357,36 +461,68 @@ class _DashboardScreenState extends State<DashboardScreen>
               ],
             ),
           ),
+          // Spacer
           const Spacer(),
-          Container(
+          // Status badge — changes with guardian toggle
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 400),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
-              color: _shieldGreen.withOpacity(0.1),
+              color: _guardianEnabled
+                  ? _shieldGreen.withOpacity(0.15)
+                  : const Color(0xFF1E2E52).withOpacity(0.5),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: _shieldGreen.withOpacity(0.3)),
+              border: Border.all(
+                color: _guardianEnabled
+                    ? _shieldGreen.withOpacity(0.5)
+                    : _borderColor,
+              ),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 400),
                   width: 6,
                   height: 6,
-                  decoration: const BoxDecoration(
+                  decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: _shieldGreen,
+                    color: _guardianEnabled ? _shieldGreen : _textSecondary,
                   ),
                 ),
                 const SizedBox(width: 5),
-                const Text(
-                  'Secure',
-                  style: TextStyle(
-                    color: _shieldGreen,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: Text(
+                    _guardianEnabled ? 'Protected' : 'Inactive',
+                    key: ValueKey(_guardianEnabled),
+                    style: TextStyle(
+                      color: _guardianEnabled ? _shieldGreen : _textSecondary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ],
             ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+              if (context.mounted) {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(builder: (_) => const LoginScreen()),
+                );
+              }
+            },
+            icon: const Icon(
+              Icons.logout_rounded,
+              color: _textSecondary,
+              size: 20,
+            ),
+            tooltip: 'Logout',
           ),
         ],
       ),
@@ -471,6 +607,51 @@ class _DashboardScreenState extends State<DashboardScreen>
           padding: const EdgeInsets.fromLTRB(20, 24, 20, 120),
           sliver: SliverList(
             delegate: SliverChildListDelegate([
+              // ── AI Guardian Protection Card ─────────────────────────────
+              Material(
+                color: Colors.transparent,
+                borderRadius: BorderRadius.circular(16),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: () {
+                    if (_guardianEnabled) {
+                      _openGuardianDashboard();
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: const Text(
+                            'Enable AI Guardian first to access the dashboard.',
+                          ),
+                          backgroundColor: _accentBlue.withOpacity(0.9),
+                          behavior: SnackBarBehavior.floating,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          duration: const Duration(seconds: 2),
+                        ),
+                      );
+                    }
+                  },
+                  splashColor: _accentBlue.withOpacity(0.08),
+                  child: _GuardianCard(
+                    enabled: _guardianEnabled,
+                    onToggle: (v) async {
+                      if (v) {
+                        final granted = await showGuardianPermissionDialog(
+                          context,
+                        );
+                        if (granted == true) {
+                          setState(() => _guardianEnabled = true);
+                        }
+                      } else {
+                        setState(() => _guardianEnabled = false);
+                      }
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
               const Text(
                 'Select Issue Type',
                 style: TextStyle(
@@ -1660,4 +1841,177 @@ class _GridPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter old) => false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AI Guardian Protection Card
+// ─────────────────────────────────────────────────────────────────────────────
+class _GuardianCard extends StatelessWidget {
+  final bool enabled;
+  final ValueChanged<bool> onToggle;
+
+  const _GuardianCard({required this.enabled, required this.onToggle});
+
+  static const Color _shieldGreen = Color(0xFF00C48C);
+  static const Color _cardBg = Color(0xFF111D3A);
+  static const Color _borderColor = Color(0xFF1E2E52);
+  static const Color _textPrimary = Color(0xFFFFFFFF);
+  static const Color _textSecondary = Color(0xFFB0BCDA);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: enabled ? _shieldGreen.withOpacity(0.08) : _cardBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: enabled ? _shieldGreen.withOpacity(0.45) : _borderColor,
+          width: 1.5,
+        ),
+        boxShadow: enabled
+            ? [
+                BoxShadow(
+                  color: _shieldGreen.withOpacity(0.15),
+                  blurRadius: 20,
+                  spreadRadius: 2,
+                  offset: const Offset(0, 4),
+                ),
+              ]
+            : [],
+      ),
+      child: Row(
+        children: [
+          // Shield icon
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 400),
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: enabled
+                  ? _shieldGreen.withOpacity(0.18)
+                  : const Color(0xFF1E2E52).withOpacity(0.5),
+              border: Border.all(
+                color: enabled ? _shieldGreen.withOpacity(0.5) : _borderColor,
+              ),
+            ),
+            child: Icon(
+              Icons.shield_rounded,
+              color: enabled ? _shieldGreen : _textSecondary,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 14),
+          // Text
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'AI Guardian Protection',
+                  style: TextStyle(
+                    color: _textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: Text(
+                    enabled
+                        ? 'Monitoring voice, motion & location'
+                        : 'Tap to enable background protection',
+                    key: ValueKey(enabled),
+                    style: TextStyle(
+                      color: enabled
+                          ? _shieldGreen.withOpacity(0.9)
+                          : _textSecondary,
+                      fontSize: 11,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Toggle
+          Switch(
+            value: enabled,
+            onChanged: onToggle,
+            activeColor: _shieldGreen,
+            activeTrackColor: _shieldGreen.withOpacity(0.3),
+            inactiveThumbColor: _textSecondary,
+            inactiveTrackColor: _borderColor,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Floating Action Button (AI / SOS)
+// ─────────────────────────────────────────────────────────────────────────────
+class _FloatingActionBtn extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _FloatingActionBtn({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: Ink(
+        width: 56,
+        height: 56,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: color,
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.5),
+              blurRadius: 16,
+              spreadRadius: 2,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: InkWell(
+          onTap: onTap,
+          splashColor: Colors.white24,
+          highlightColor: Colors.white10,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.white, size: 22),
+              const SizedBox(height: 1),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

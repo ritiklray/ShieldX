@@ -1397,7 +1397,7 @@ class _AiDocumentAssistantScreenState extends State<AiDocumentAssistantScreen>
                   Icon(Icons.edit_document, color: Colors.white, size: 20),
                   SizedBox(width: 10),
                   Text(
-                    'Complaint File Karo',
+                    'Complaint File',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 16,
