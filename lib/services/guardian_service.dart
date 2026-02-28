@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -10,11 +11,37 @@ import 'package:android_intent_plus/android_intent.dart';
 
 // ── Global guard: prevent duplicate triggers within 30 seconds ──────────────
 bool _emergencyCooldown = false;
+bool _isServiceRunning = true;
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
+  _isServiceRunning = true;
   int shakeCount = 0;
   DateTime? lastShake;
+
+  StreamSubscription? accelSub;
+  Timer? keepAliveTimer;
+
+  // 1. Listen to UI manual OFF request strictly
+  service.on('stopService').listen((event) {
+    _isServiceRunning = false;
+    if (service is AndroidServiceInstance) {
+      // Demote first to instantly remove the foreground notification on some Android versions
+      service.setAsBackgroundService();
+    }
+    accelSub?.cancel();
+    keepAliveTimer?.cancel();
+    try {
+      _speechToText.stop();
+    } catch (_) {}
+    _isListening = false;
+    service.stopSelf();
+
+    // Forcefully kill the background Dart isolate to guarantee removal
+    Timer(const Duration(milliseconds: 800), () {
+      exit(0);
+    });
+  });
 
   // Notification for foreground service
   if (service is AndroidServiceInstance) {
@@ -24,42 +51,40 @@ void onStart(ServiceInstance service) async {
     service.on('setAsBackground').listen((event) {
       service.setAsBackgroundService();
     });
-    service.on('stopService').listen((event) {
-      service.stopSelf();
-    });
   }
 
   // --- Real Shake Detection ---
-  userAccelerometerEventStream(
-    samplingPeriod: const Duration(milliseconds: 100),
-  ).listen((event) async {
-    if (_emergencyCooldown) return; // Don't fire during cooldown
+  accelSub =
+      userAccelerometerEventStream(
+        samplingPeriod: const Duration(milliseconds: 100),
+      ).listen((event) async {
+        if (_emergencyCooldown || !_isServiceRunning) return;
 
-    double magnitude = sqrt(
-      event.x * event.x + event.y * event.y + event.z * event.z,
-    );
-    if (magnitude > 12.0) {
-      final now = DateTime.now();
-      if (lastShake != null &&
-          now.difference(lastShake!).inMilliseconds > 1500) {
-        shakeCount = 0;
-      }
-      lastShake = now;
-      shakeCount++;
+        double magnitude = sqrt(
+          event.x * event.x + event.y * event.y + event.z * event.z,
+        );
+        if (magnitude > 12.0) {
+          final now = DateTime.now();
+          if (lastShake != null &&
+              now.difference(lastShake!).inMilliseconds > 1500) {
+            shakeCount = 0;
+          }
+          lastShake = now;
+          shakeCount++;
 
-      if (shakeCount >= 3) {
-        shakeCount = 0;
-        _emergencyCooldown = true;
-        await _executeEmergencyProtocols('Shake Detected (Background)');
-        // Release cooldown after 30 seconds
-        await Future.delayed(const Duration(seconds: 30));
-        _emergencyCooldown = false;
-      }
-    }
-  });
+          if (shakeCount >= 3) {
+            shakeCount = 0;
+            _emergencyCooldown = true;
+            await _executeEmergencyProtocols('Shake Detected (Background)');
+            await Future.delayed(const Duration(seconds: 30));
+            _emergencyCooldown = false;
+          }
+        }
+      });
 
   // Timer loop just to keep service alive gracefully
-  Timer.periodic(const Duration(seconds: 15), (timer) async {
+  keepAliveTimer = Timer.periodic(const Duration(seconds: 15), (timer) async {
+    if (!_isServiceRunning) return;
     if (service is AndroidServiceInstance) {
       if (await service.isForegroundService()) {
         // Optionally update notification
@@ -77,17 +102,18 @@ final SpeechToText _speechToText = SpeechToText();
 bool _isListening = false;
 
 Future<void> _initVoiceSafe() async {
+  if (!_isServiceRunning) return;
   bool available = await _speechToText.initialize(
     onError: (e) {
+      if (!_isServiceRunning) return;
       print('STT Bg Error: $e');
       _isListening = false;
-      // Wait to prevent system exhaust loops
       Future.delayed(const Duration(seconds: 4), _startListeningSafe);
     },
     onStatus: (status) {
+      if (!_isServiceRunning) return;
       if (status == 'done' || status == 'notListening') {
         _isListening = false;
-        // Keep listening constantly in background
         Future.delayed(const Duration(seconds: 1), _startListeningSafe);
       }
     },
@@ -99,7 +125,7 @@ Future<void> _initVoiceSafe() async {
 }
 
 void _startListeningSafe() {
-  if (_isListening) return;
+  if (_isListening || !_isServiceRunning) return;
   _isListening = true;
   try {
     _speechToText.listen(

@@ -7,6 +7,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_phone_direct_caller/flutter_phone_direct_caller.dart';
 import 'package:telephony/telephony.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'guardian_permission_dialog.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,13 +107,13 @@ class _AiGuardianScreenState extends State<AiGuardianScreen>
   // ── Monitoring tick ───────────────────────────────────────────────────────
   void _startMonitoring() {
     FlutterBackgroundService().startService();
+    _saveGuardianState(true);
 
     _tickTimer?.cancel();
     _startRealSensors();
 
     _tickTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
-      // Slowly decay scores when no trigger
       setState(() {
         _voicePanic = (_voicePanic - 2).clamp(0, 100);
         _stressLevel = (_stressLevel - 1).clamp(0, 100);
@@ -124,10 +125,16 @@ class _AiGuardianScreenState extends State<AiGuardianScreen>
 
   void _stopMonitoring() {
     FlutterBackgroundService().invoke('stopService');
+    _saveGuardianState(false);
 
     _tickTimer?.cancel();
     _accelSubscription?.cancel();
     _speechToText.stop();
+  }
+
+  Future<void> _saveGuardianState(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('guardian_enabled', enabled);
   }
 
   Future<void> _startRealSensors() async {
