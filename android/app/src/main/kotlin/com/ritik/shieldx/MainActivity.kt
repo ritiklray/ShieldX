@@ -1,4 +1,4 @@
-package com.example.shieldx
+package com.ritik.shieldx
 
 import io.flutter.embedding.android.FlutterActivity
 

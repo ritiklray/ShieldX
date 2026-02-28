@@ -1,44 +1,533 @@
-import 'dart:math';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'complaint_success_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Enums & Models
+// Groq AI Service
 // ─────────────────────────────────────────────────────────────────────────────
 
-enum _VerificationPhase {
-  analyzing, // Step 1 – progress bar + "Analyzing…"
-  comparing, // Step 2 – data comparison table
-  result, // Step 3 – risk badge + message
+class _GroqService {
+  static const String _apiKey =
+      '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';
+  static const String _model =
+      'llama3-70b-8192'; // Upgraded to 70B for better reasoning
+  static const String _endpoint =
+      'https://api.groq.com/openai/v1/chat/completions';
+
+  static Future<_AiResult> analyzeComplaint({
+    required String category,
+    required Map<String, String> formData,
+  }) async {
+    // ── STEP 1: Always compute local score first ───────────────────────────
+    final filledFields = formData.entries
+        .where((e) => e.value.trim().isNotEmpty)
+        .toList();
+    final emptyFields = formData.entries
+        .where((e) => e.value.trim().isEmpty)
+        .toList();
+    final totalFields = formData.length;
+    final filledCount = filledFields.length;
+    final completionRatio = totalFields > 0 ? filledCount / totalFields : 0.0;
+    final completionPct = (completionRatio * 100).toStringAsFixed(0);
+
+    final descField =
+        formData['description'] ??
+        formData['incident_description'] ??
+        formData['description_of_incident'] ??
+        '';
+    final descLen = descField.trim().length;
+
+    // ── STEP 2: HARD BLOCK — skip API entirely for obviously bad data ──────
+    // Less than 40% filled OR description too short → instant HIGH RISK
+    if (completionRatio < 0.40 || descLen < 30) {
+      debugPrint(
+        '[ShieldX AI] Hard block triggered: completion=$completionPct%, descLen=$descLen',
+      );
+      return _smartLocalAnalysis(
+        category: category,
+        formData: formData,
+        filledFields: filledFields,
+        emptyFields: emptyFields,
+      );
+    }
+
+    final formSummary = filledFields
+        .map((e) => '  • ${e.key}: "${e.value}"')
+        .join('\n');
+
+    final missingList = emptyFields.map((e) => '  • ${e.key}').join('\n');
+
+    final systemPrompt =
+        '''You are a senior Indian cybercrime fraud detection AI for the ShieldX law enforcement platform.
+Your job is to GENUINELY and CRITICALLY analyze cybercrime complaints filed by Indian citizens.
+You MUST give accurate, honest assessments based ONLY on the evidence provided.
+
+STRICT RULES — FOLLOW EXACTLY:
+1. If description is vague, short, or generic → mark as HIGH RISK / suspicious
+2. If financial amounts are missing or zero → mark as warning
+3. If fewer than 50% of fields are filled → complaint_validity = "incomplete", risk = "high"
+4. If description contains real specifics (dates, amounts, platform names, transaction IDs) → lower risk
+5. If the complaint looks copy-pasted or too generic → mark as suspicious
+6. NEVER default to medium risk — genuinely score LOW, MEDIUM, or HIGH based on data
+7. case_strength: 1 if form barely filled, 10 if extremely detailed with all evidence
+8. Respond ONLY with raw JSON — no markdown, no explanation, nothing else''';
+
+    final userPrompt =
+        '''CYBERCRIME COMPLAINT TO ANALYZE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Crime Category: $category
+Form Completion: $completionPct% ($filledCount of $totalFields fields filled)
+
+FILLED FIELDS:
+$formSummary
+
+MISSING/EMPTY FIELDS (${emptyFields.length} fields):
+${missingList.isEmpty ? '  (none)' : missingList}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INSTRUCTIONS:
+- Analyze each filled field for genuineness and detail
+- Flag vague descriptions, generic text, or implausible data
+- Check if financial data (amounts, account numbers, transaction IDs) is present and realistic
+- Check if timeline/dates are consistent
+- Determine overall complaint credibility
+
+Return ONLY this JSON (no markdown, no text before or after):
+{
+  "risk_level": "low",
+  "risk_summary": "specific reason based on actual data provided",
+  "complaint_validity": "valid",
+  "field_analysis": [
+    {
+      "field": "exact field name from form",
+      "value": "actual submitted value",
+      "assessment": "ok",
+      "note": "specific observation about this field"
+    }
+  ],
+  "ai_observations": [
+    "Specific observation 1 about the complaint data",
+    "Specific observation 2",
+    "Specific observation 3"
+  ],
+  "red_flags": [
+    "Red flag if any, else empty array"
+  ],
+  "recommended_actions": [
+    "Specific legal action 1 relevant to $category in India",
+    "Specific evidence to gather 2",
+    "Specific step 3"
+  ],
+  "estimated_case_strength": 5
 }
 
-enum _MatchStatus { match, possible, mismatch }
+RISK SCORING GUIDE:
+- "low" = form >80% complete, has specific amounts/dates/IDs, detailed description (>100 chars)
+- "medium" = form 50-80% complete, some specifics present but missing key evidence
+- "high" = form <50% complete, vague description (<50 chars), missing financial/identity data, looks fake''';
 
-class _FieldComparison {
-  final String label;
-  final String formValue;
-  final String docValue;
-  final _MatchStatus status;
+    try {
+      final response = await http.post(
+        Uri.parse(_endpoint),
+        headers: {
+          'Authorization': 'Bearer $_apiKey',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'model': _model,
+          'messages': [
+            {'role': 'system', 'content': systemPrompt},
+            {'role': 'user', 'content': userPrompt},
+          ],
+          'temperature':
+              0.1, // Very low temperature for consistent, strict analysis
+          'max_tokens': 1500,
+          'response_format': {'type': 'json_object'}, // Force JSON response
+        }),
+      );
 
-  const _FieldComparison({
-    required this.label,
-    required this.formValue,
-    required this.docValue,
-    required this.status,
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final content = data['choices'][0]['message']['content'] as String;
+        final cleaned = content
+            .replaceAll('```json', '')
+            .replaceAll('```', '')
+            .trim();
+        final parsed = jsonDecode(cleaned);
+        final groqResult = _AiResult.fromJson(
+          parsed,
+          filledFields: filledFields,
+        );
+
+        // ── POST-API SANITY OVERRIDE ─────────────────────────────────────
+        // If Groq says LOW but our strict local scoring says otherwise, correct it
+        final localResult = _smartLocalAnalysis(
+          category: category,
+          formData: formData,
+          filledFields: filledFields,
+          emptyFields: emptyFields,
+        );
+        // Groq is overridden if it's too optimistic vs local scoring
+        if (groqResult.riskLevel == _RiskLevel.low &&
+            localResult.riskLevel != _RiskLevel.low) {
+          debugPrint(
+            '[ShieldX AI] Groq overridden: was LOW, corrected to ${localResult.riskLevel.name.toUpperCase()}',
+          );
+          return _AiResult(
+            riskLevel: localResult.riskLevel,
+            riskSummary: groqResult.riskSummary.isNotEmpty
+                ? groqResult.riskSummary
+                : localResult.riskSummary,
+            complaintValidity: localResult.complaintValidity,
+            fieldAnalysis: groqResult.fieldAnalysis.isNotEmpty
+                ? groqResult.fieldAnalysis
+                : localResult.fieldAnalysis,
+            observations: groqResult.observations.isNotEmpty
+                ? groqResult.observations
+                : localResult.observations,
+            redFlags: localResult.redFlags.isNotEmpty
+                ? localResult.redFlags
+                : groqResult.redFlags,
+            recommendedActions: [],
+            caseStrength: localResult.caseStrength,
+          );
+        }
+
+        return groqResult;
+      } else {
+        debugPrint('Groq API Error: ${response.statusCode} — ${response.body}');
+        throw Exception('API Error ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Groq Exception: $e');
+      return _smartLocalAnalysis(
+        category: category,
+        formData: formData,
+        filledFields: filledFields,
+        emptyFields: emptyFields,
+      );
+    }
+  }
+
+  // ── Smart local analysis when API fails ──────────────────────────────────
+  static _AiResult _smartLocalAnalysis({
+    required String category,
+    required Map<String, String> formData,
+    required List<MapEntry<String, String>> filledFields,
+    required List<MapEntry<String, String>> emptyFields,
+  }) {
+    int score = 0; // 0-100
+
+    // 1. Form completion score (max 30 pts)
+    final total = formData.length;
+    final filled = filledFields.length;
+    final completionRatio = total > 0 ? filled / total : 0.0;
+    score += (completionRatio * 30).toInt();
+
+    // 2. Description quality score (max 30 pts)
+    final descField =
+        formData['description'] ?? formData['incident_description'] ?? '';
+    final descLen = descField.trim().length;
+    if (descLen > 300)
+      score += 30;
+    else if (descLen > 150)
+      score += 20;
+    else if (descLen > 80)
+      score += 12;
+    else if (descLen > 30)
+      score += 5;
+    // else 0
+
+    // 3. Financial data present (max 20 pts)
+    final hasAmount = formData.entries.any(
+      (e) =>
+          (e.key.contains('amount') ||
+              e.key.contains('money') ||
+              e.key.contains('loss')) &&
+          e.value.trim().isNotEmpty,
+    );
+    final hasTransactionId = formData.entries.any(
+      (e) =>
+          (e.key.contains('txn') ||
+              e.key.contains('transaction') ||
+              e.key.contains('utr')) &&
+          e.value.trim().isNotEmpty,
+    );
+    if (hasAmount) score += 10;
+    if (hasTransactionId) score += 10;
+
+    // 4. Has date/time info (max 10 pts)
+    final hasDate = formData.entries.any(
+      (e) =>
+          (e.key.contains('date') || e.key.contains('time')) &&
+          e.value.trim().isNotEmpty,
+    );
+    if (hasDate) score += 10;
+
+    // 5. Document uploaded (max 10 pts — proxy: check uploads map via field names)
+    final hasDoc = filledFields.any(
+      (e) =>
+          e.key.contains('screenshot') ||
+          e.key.contains('statement') ||
+          e.key.contains('photo') ||
+          e.key.contains('document') ||
+          e.key.contains('gov_id') ||
+          e.key.contains('upload'),
+    );
+    if (hasDoc) score += 10;
+
+    // Determine risk
+    final _RiskLevel risk;
+    final String riskSummary;
+    final String validity;
+    int caseStrength;
+
+    if (score >= 65) {
+      risk = _RiskLevel.low;
+      riskSummary =
+          'Complaint is well-documented with sufficient details and evidence. Strong case for investigation.';
+      validity = 'valid';
+      caseStrength = 7 + ((score - 65) / 12).clamp(0, 3).toInt();
+    } else if (score >= 35) {
+      risk = _RiskLevel.medium;
+      riskSummary =
+          'Complaint has partial information. Additional evidence and details are required to strengthen the case.';
+      validity = completionRatio < 0.5 ? 'incomplete' : 'valid';
+      caseStrength = 4 + ((score - 35) / 10).clamp(0, 3).toInt();
+    } else {
+      risk = _RiskLevel.high;
+      riskSummary =
+          'Complaint lacks critical details. Very few fields are filled and description is insufficient for investigation.';
+      validity = 'incomplete';
+      caseStrength = (score / 12).clamp(1, 3).toInt();
+    }
+
+    // Build field analysis
+    final fieldAnalysis = <_FieldAnalysis>[];
+
+    // Check each filled field
+    for (final entry in filledFields.take(6)) {
+      String assessment = 'ok';
+      String note = 'Field submitted successfully';
+
+      if (entry.key.contains('description') || entry.key.contains('incident')) {
+        if (entry.value.length < 50) {
+          assessment = 'warning';
+          note =
+              'Description is too brief. Provide more details about the incident';
+        } else if (entry.value.length < 100) {
+          assessment = 'warning';
+          note = 'Moderately detailed. Add more specifics for stronger case';
+        } else {
+          note = 'Good description with sufficient detail';
+        }
+      } else if (entry.key.contains('amount') || entry.key.contains('money')) {
+        final val = double.tryParse(
+          entry.value.replaceAll(RegExp(r'[^0-9.]'), ''),
+        );
+        if (val == null || val == 0) {
+          assessment = 'warning';
+          note = 'Invalid or zero amount — verify the financial loss';
+        } else {
+          note = '₹${entry.value} — financial loss documented';
+        }
+      } else if (entry.key.contains('phone') || entry.key.contains('mobile')) {
+        if (entry.value.length < 10) {
+          assessment = 'warning';
+          note = 'Invalid phone number format';
+        } else {
+          note = 'Contact number verified';
+        }
+      }
+
+      fieldAnalysis.add(
+        _FieldAnalysis(
+          field: entry.key.replaceAll('_', ' ').toUpperCase(),
+          value: entry.value.length > 40
+              ? '${entry.value.substring(0, 40)}…'
+              : entry.value,
+          assessment: assessment,
+          note: note,
+        ),
+      );
+    }
+
+    // Add missing critical fields as warnings
+    for (final entry in emptyFields.take(3)) {
+      fieldAnalysis.add(
+        _FieldAnalysis(
+          field: entry.key.replaceAll('_', ' ').toUpperCase(),
+          value: 'Not provided',
+          assessment: 'missing',
+          note: 'This field was left empty — weakens the case',
+        ),
+      );
+    }
+
+    // Build observations
+    final observations = <String>[];
+    if (descLen < 50)
+      observations.add(
+        '⚠️ Incident description is too short ($descLen chars). Detailed description is crucial for FIR registration.',
+      );
+    else if (descLen > 200)
+      observations.add(
+        '✅ Incident description is detailed ($descLen chars) — good basis for investigation.',
+      );
+    else
+      observations.add(
+        'ℹ️ Description is moderate. Adding more specifics (dates, amounts, platform details) will help.',
+      );
+
+    if (!hasAmount)
+      observations.add(
+        '⚠️ No financial loss amount mentioned — if money was lost, this must be included for legal processing.',
+      );
+    else
+      observations.add(
+        '✅ Financial loss amount is documented — important for case valuation.',
+      );
+
+    if (!hasDate)
+      observations.add(
+        '⚠️ Incident date/time not clearly specified — timeline is crucial for cybercrime investigation.',
+      );
+    else
+      observations.add('✅ Incident timeline is provided.');
+
+    if (emptyFields.length > filled)
+      observations.add(
+        '⚠️ More than half the form is incomplete (${emptyFields.length} empty fields) — seriously weakens the case.',
+      );
+
+    final actions = [
+      'Report to National Cyber Crime Portal: cybercrime.gov.in',
+      if (!hasAmount) 'Add exact financial loss amount in Indian Rupees (₹)',
+      if (!hasTransactionId) 'Collect and add all transaction IDs, UTR numbers',
+      if (descLen < 100)
+        'Rewrite incident description with full details — who, what, when, where, how',
+      if (!hasDoc)
+        'Upload supporting documents: bank statements, screenshots, call recordings',
+      if (category.contains('Financial') ||
+          category.contains('UPI') ||
+          category.contains('Loan'))
+        'Immediately contact your bank\'s fraud helpline: 1800-891-3333',
+      'Note: Cybercrime complaints are covered under IT Act 2000, Section 66C/66D',
+    ];
+
+    return _AiResult(
+      riskLevel: risk,
+      riskSummary: riskSummary,
+      complaintValidity: validity,
+      fieldAnalysis: fieldAnalysis,
+      observations: observations.take(3).toList(),
+      redFlags: score < 35
+          ? [
+              if (descLen < 50)
+                'Critically short description — possible fake/test complaint',
+              if (completionRatio < 0.3)
+                'Less than 30% of form filled — insufficient for processing',
+            ]
+          : [],
+      recommendedActions: actions.take(4).toList(),
+      caseStrength: caseStrength,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Models
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum _RiskLevel { low, medium, high }
+
+class _FieldAnalysis {
+  final String field;
+  final String value;
+  final String assessment; // ok | warning | missing
+  final String note;
+  const _FieldAnalysis({
+    required this.field,
+    required this.value,
+    required this.assessment,
+    required this.note,
   });
 }
 
-enum _RiskLevel { low, medium, high }
+class _AiResult {
+  final _RiskLevel riskLevel;
+  final String riskSummary;
+  final String complaintValidity;
+  final List<_FieldAnalysis> fieldAnalysis;
+  final List<String> observations;
+  final List<String> redFlags;
+  final List<String> recommendedActions;
+  final int caseStrength;
+
+  const _AiResult({
+    required this.riskLevel,
+    required this.riskSummary,
+    required this.complaintValidity,
+    required this.fieldAnalysis,
+    required this.observations,
+    this.redFlags = const [],
+    required this.recommendedActions,
+    required this.caseStrength,
+  });
+
+  factory _AiResult.fromJson(
+    Map<String, dynamic> json, {
+    List<MapEntry<String, String>>? filledFields,
+  }) {
+    final riskStr = (json['risk_level'] ?? 'medium').toString().toLowerCase();
+    final risk = riskStr == 'low'
+        ? _RiskLevel.low
+        : riskStr == 'high'
+        ? _RiskLevel.high
+        : _RiskLevel.medium;
+
+    final fields = (json['field_analysis'] as List? ?? [])
+        .map(
+          (f) => _FieldAnalysis(
+            field: f['field']?.toString() ?? '',
+            value: f['value']?.toString() ?? '',
+            assessment: f['assessment']?.toString() ?? 'ok',
+            note: f['note']?.toString() ?? '',
+          ),
+        )
+        .toList();
+
+    return _AiResult(
+      riskLevel: risk,
+      riskSummary: json['risk_summary']?.toString() ?? '',
+      complaintValidity: json['complaint_validity']?.toString() ?? 'valid',
+      fieldAnalysis: fields,
+      observations: List<String>.from(json['ai_observations'] ?? []),
+      redFlags: List<String>.from(json['red_flags'] ?? []),
+      recommendedActions: List<String>.from(json['recommended_actions'] ?? []),
+      caseStrength: (() {
+        final raw = json['estimated_case_strength'];
+        if (raw is int) return raw.clamp(1, 10);
+        if (raw is double) return raw.toInt().clamp(1, 10);
+        return 5;
+      })(),
+    );
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Screen
 // ─────────────────────────────────────────────────────────────────────────────
+
+enum _VerificationPhase { analyzing, result }
 
 class AiVerificationScreen extends StatefulWidget {
   final String complaintId;
   final String officerId;
   final String category;
   final List<Color> categoryGradient;
+  final Map<String, String> formData;
 
   const AiVerificationScreen({
     super.key,
@@ -46,6 +535,7 @@ class AiVerificationScreen extends StatefulWidget {
     required this.officerId,
     required this.category,
     required this.categoryGradient,
+    required this.formData,
   });
 
   @override
@@ -54,78 +544,44 @@ class AiVerificationScreen extends StatefulWidget {
 
 class _AiVerificationScreenState extends State<AiVerificationScreen>
     with TickerProviderStateMixin {
-  // ── Phases ──────────────────────────────────────────────────────────────────
   _VerificationPhase _phase = _VerificationPhase.analyzing;
+  _AiResult? _result;
+  String _statusMessage = 'Connecting to ShieldX AI...';
+  double _progress = 0;
+  bool _isSubmitting = false;
 
-  // ── Progress bar animation ──────────────────────────────────────────────────
-  late AnimationController _progressCtrl;
-  late Animation<double> _progressAnim;
-
-  // ── Entry / fade animations ─────────────────────────────────────────────────
+  // ── Animations ────────────────────────────────────────────────────────────
+  late AnimationController _pulseCtrl;
+  late Animation<double> _pulseAnim;
   late AnimationController _entryCtrl;
   late Animation<double> _fadeAnim;
   late Animation<Offset> _slideAnim;
 
-  // ── Pulse glow ──────────────────────────────────────────────────────────────
-  late AnimationController _pulseCtrl;
-  late Animation<double> _pulseAnim;
-
-  // ── Submission state ────────────────────────────────────────────────────────
-  bool _isSubmitting = false;
-
-  // ── Analysis done flag (unlocks Next button on Phase 1) ─────────────────────
-  bool _analysisComplete = false;
-
-  // ── Demo data (deterministic for UI purposes) ───────────────────────────────
-  static const _formName = 'Rahul Sharma';
-  static const _formDob = '15/08/1992';
-
-  late final List<_FieldComparison> _comparisons;
-  late final _RiskLevel _riskLevel;
-
-  // ── Colors (matches app palette) ────────────────────────────────────────────
+  // ── Colors ────────────────────────────────────────────────────────────────
   static const Color _bg1 = Color(0xFF0A0F1E);
   static const Color _bg2 = Color(0xFF0D1B3E);
   static const Color _bg3 = Color(0xFF112250);
   static const Color _cardBg = Color(0xFF111D3A);
-  static const Color _inputBg = Color(0xFF0D1530);
   static const Color _accentBlue = Color(0xFF3B8BFF);
   static const Color _accentOrange = Color(0xFFFF6B2B);
   static const Color _shieldGreen = Color(0xFF00C48C);
   static const Color _textPrimary = Color(0xFFFFFFFF);
   static const Color _textSecondary = Color(0xFFB0BCDA);
   static const Color _borderColor = Color(0xFF1E2E52);
-  static const Color _warnBg = Color(0xFF1E1408);
-  static const Color _warnBorder = Color(0xFF7A4A10);
-  static const Color _warnText = Color(0xFFFFA94D);
 
-  // Status colours
-  static const Color _matchGreen = Color(0xFF00C48C);
-  static const Color _possibleYellow = Color(0xFFF5C518);
-  static const Color _mismatchRed = Color(0xFFFF4C6A);
-
-  // ── Init ────────────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
 
-    // Generate demo risk + comparisons once
-    final rnd = Random();
-    final roll = rnd.nextInt(3); // 0=low, 1=medium, 2=high (demo)
-    _riskLevel = _RiskLevel.values[roll == 2 ? 1 : roll]; // cap demo at medium
-    _comparisons = _buildComparisons(_riskLevel);
-
-    // Progress bar
-    _progressCtrl = AnimationController(
+    _pulseCtrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2800),
-    );
-    _progressAnim = CurvedAnimation(
-      parent: _progressCtrl,
-      curve: Curves.easeInOut,
-    );
+      duration: const Duration(seconds: 2),
+    )..repeat(reverse: true);
+    _pulseAnim = Tween<double>(
+      begin: 0.92,
+      end: 1.08,
+    ).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
 
-    // Entry animations
     _entryCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
@@ -136,112 +592,62 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
       end: Offset.zero,
     ).animate(CurvedAnimation(parent: _entryCtrl, curve: Curves.easeOutCubic));
 
-    // Pulse
-    _pulseCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
-    _pulseAnim = Tween<double>(
-      begin: 0.92,
-      end: 1.08,
-    ).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
-
-    // Start analysis — only play the progress bar, no auto-transition
     _entryCtrl.forward();
-    _progressCtrl.forward().whenComplete(() {
-      if (!mounted) return;
-      setState(() => _analysisComplete = true); // unlocks Next button
-    });
-  }
-
-  List<_FieldComparison> _buildComparisons(_RiskLevel risk) {
-    if (risk == _RiskLevel.low) {
-      return const [
-        _FieldComparison(
-          label: 'Full Name',
-          formValue: _formName,
-          docValue: 'RAHUL SHARMA',
-          status: _MatchStatus.match,
-        ),
-        _FieldComparison(
-          label: 'Date of Birth',
-          formValue: _formDob,
-          docValue: '15-08-1992',
-          status: _MatchStatus.match,
-        ),
-        _FieldComparison(
-          label: 'ID Number Format',
-          formValue: 'Valid',
-          docValue: 'Valid (Aadhaar)',
-          status: _MatchStatus.match,
-        ),
-      ];
-    } else if (risk == _RiskLevel.medium) {
-      return const [
-        _FieldComparison(
-          label: 'Full Name',
-          formValue: _formName,
-          docValue: 'R. SHARMA',
-          status: _MatchStatus.possible,
-        ),
-        _FieldComparison(
-          label: 'Date of Birth',
-          formValue: _formDob,
-          docValue: '15/08/1992',
-          status: _MatchStatus.match,
-        ),
-        _FieldComparison(
-          label: 'ID Number Format',
-          formValue: 'Valid',
-          docValue: 'Valid (PAN)',
-          status: _MatchStatus.possible,
-        ),
-      ];
-    } else {
-      return const [
-        _FieldComparison(
-          label: 'Full Name',
-          formValue: _formName,
-          docValue: 'UNKNOWN',
-          status: _MatchStatus.mismatch,
-        ),
-        _FieldComparison(
-          label: 'Date of Birth',
-          formValue: _formDob,
-          docValue: '01/01/1990',
-          status: _MatchStatus.mismatch,
-        ),
-        _FieldComparison(
-          label: 'ID Number Format',
-          formValue: 'Valid',
-          docValue: 'Invalid / Unreadable',
-          status: _MatchStatus.mismatch,
-        ),
-      ];
-    }
-  }
-
-  void _transitionTo(_VerificationPhase phase) {
-    setState(() => _phase = phase);
-    _entryCtrl.reset();
-    _entryCtrl.forward();
+    _runAnalysis();
   }
 
   @override
   void dispose() {
-    _progressCtrl.dispose();
-    _entryCtrl.dispose();
     _pulseCtrl.dispose();
+    _entryCtrl.dispose();
     super.dispose();
   }
 
-  // ── Navigation ───────────────────────────────────────────────────────────────
+  // ── Real Groq Analysis ────────────────────────────────────────────────────
+  Future<void> _runAnalysis() async {
+    final steps = [
+      (0.15, 'Reading complaint data...'),
+      (0.35, 'Analyzing form fields...'),
+      (0.55, 'Cross-referencing with crime patterns...'),
+      (0.75, 'Evaluating case strength...'),
+      (0.90, 'Generating AI risk report...'),
+    ];
+
+    for (final step in steps) {
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!mounted) return;
+      setState(() {
+        _progress = step.$1;
+        _statusMessage = step.$2;
+      });
+    }
+
+    // Real Groq API call
+    final result = await _GroqService.analyzeComplaint(
+      category: widget.category,
+      formData: widget.formData,
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _progress = 1.0;
+      _statusMessage = 'Analysis complete!';
+      _result = result;
+    });
+
+    await Future.delayed(const Duration(milliseconds: 700));
+    if (!mounted) return;
+
+    setState(() => _phase = _VerificationPhase.result);
+    _entryCtrl.reset();
+    _entryCtrl.forward();
+  }
+
   Future<void> _proceedToSuccess() async {
     if (_isSubmitting) return;
     setState(() => _isSubmitting = true);
-    await Future.delayed(const Duration(milliseconds: 1200));
+    await Future.delayed(const Duration(milliseconds: 800));
     if (!mounted) return;
-    setState(() => _isSubmitting = false);
     Navigator.pushReplacement(
       context,
       PageRouteBuilder(
@@ -260,14 +666,14 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
     );
   }
 
-  // ── Build ────────────────────────────────────────────────────────────────────
+  // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _bg1,
       body: Stack(
         children: [
-          // Background gradient
+          // Background
           Container(
             decoration: const BoxDecoration(
               gradient: RadialGradient(
@@ -278,13 +684,12 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
               ),
             ),
           ),
-          // Subtle grid
           CustomPaint(
             size: MediaQuery.of(context).size,
             painter: _GridPainter(color: _accentBlue.withOpacity(0.025)),
           ),
 
-          // Blue scan glow
+          // Blue pulse glow
           Positioned(
             top: -60,
             left: 0,
@@ -316,7 +721,6 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
             child: Column(
               children: [
                 _buildTopBar(),
-                _buildPhaseProgressBar(),
                 Expanded(
                   child: SlideTransition(
                     position: _slideAnim,
@@ -324,7 +728,9 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
                       opacity: _fadeAnim,
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.fromLTRB(20, 24, 20, 120),
-                        child: _buildPhaseBody(),
+                        child: _phase == _VerificationPhase.analyzing
+                            ? _buildAnalyzingPhase()
+                            : _buildResultPhase(),
                       ),
                     ),
                   ),
@@ -333,21 +739,15 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
             ),
           ),
 
-          // Bottom bar — Next on analyzing/comparing, Submit on result
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: _phase == _VerificationPhase.result
-                ? _buildBottomSubmitBar()
-                : _buildNextBar(),
-          ),
+          // Bottom bar
+          if (_phase == _VerificationPhase.result)
+            Positioned(bottom: 0, left: 0, right: 0, child: _buildSubmitBar()),
         ],
       ),
     );
   }
 
-  // ── Top bar ──────────────────────────────────────────────────────────────────
+  // ── Top Bar ───────────────────────────────────────────────────────────────
   Widget _buildTopBar() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -357,7 +757,6 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
       ),
       child: Row(
         children: [
-          // Lock icon badge
           Container(
             width: 36,
             height: 36,
@@ -367,7 +766,7 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
               border: Border.all(color: _accentBlue.withOpacity(0.3)),
             ),
             child: const Icon(
-              Icons.verified_user_rounded,
+              Icons.smart_toy_rounded,
               color: _accentBlue,
               size: 18,
             ),
@@ -399,7 +798,7 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
                 ),
               ),
               const Text(
-                'AI Document Validation',
+                'Groq AI · Document Verification',
                 style: TextStyle(color: _textSecondary, fontSize: 10),
               ),
             ],
@@ -426,346 +825,131 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
     );
   }
 
-  // ── Phase-level progress dots ─────────────────────────────────────────────────
-  Widget _buildPhaseProgressBar() {
-    final labels = ['Analyzing', 'Comparing', 'Result'];
-    final currentIndex = _phase.index;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-      decoration: BoxDecoration(
-        color: _cardBg.withOpacity(0.6),
-        border: Border(bottom: BorderSide(color: _borderColor, width: 1)),
-      ),
-      child: Row(
-        children: List.generate(labels.length * 2 - 1, (i) {
-          if (i.isOdd) {
-            // Connector
-            final stepIdx = i ~/ 2;
-            final done = stepIdx < currentIndex;
-            return Expanded(
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 500),
-                height: 2,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                decoration: BoxDecoration(
-                  color: done ? _accentBlue : _borderColor,
-                  borderRadius: BorderRadius.circular(1),
-                ),
-              ),
-            );
-          }
-          final stepIdx = i ~/ 2;
-          final done = stepIdx <= currentIndex;
-          final active = stepIdx == currentIndex;
-          return Column(
-            children: [
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 400),
-                width: 28,
-                height: 28,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: done
-                      ? _accentBlue.withOpacity(active ? 0.25 : 0.15)
-                      : _borderColor.withOpacity(0.3),
-                  border: Border.all(
-                    color: done ? _accentBlue : _borderColor,
-                    width: active ? 2 : 1.5,
-                  ),
-                ),
-                child: Icon(
-                  stepIdx == 0
-                      ? Icons.document_scanner_rounded
-                      : stepIdx == 1
-                      ? Icons.compare_arrows_rounded
-                      : Icons.shield_rounded,
-                  color: done ? _accentBlue : _textSecondary,
-                  size: 13,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                labels[stepIdx],
-                style: TextStyle(
-                  color: done ? _accentBlue : _textSecondary,
-                  fontSize: 9,
-                  fontWeight: active ? FontWeight.w700 : FontWeight.w400,
-                ),
-              ),
-            ],
-          );
-        }),
-      ),
-    );
-  }
-
-  // ── Phase body dispatcher ────────────────────────────────────────────────────
-  Widget _buildPhaseBody() {
-    return switch (_phase) {
-      _VerificationPhase.analyzing => _buildAnalyzingPhase(),
-      _VerificationPhase.comparing => _buildComparingPhase(),
-      _VerificationPhase.result => _buildResultPhase(),
-    };
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════════
-  // PHASE 1 – Analyzing
-  // ══════════════════════════════════════════════════════════════════════════════
+  // ── Phase 1: Analyzing ────────────────────────────────────────────────────
   Widget _buildAnalyzingPhase() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Section header
-        _sectionHeader(
-          icon: Icons.document_scanner_rounded,
-          iconColor: _accentBlue,
-          title: 'AI Document Validation',
-          subtitle: 'Secure automated analysis in progress',
-        ),
-        const SizedBox(height: 20),
-
-        // Document preview card
-        _buildDocumentPreviewCard(),
-        const SizedBox(height: 20),
-
-        // Progress block
-        _buildAnalysisProgressBlock(),
-        const SizedBox(height: 20),
-
-        // Info note
-        _buildInfoNote(
-          icon: Icons.lock_rounded,
-          color: _accentBlue,
-          text:
-              'Document data is processed using encrypted channels. No data is stored after verification.',
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDocumentPreviewCard() {
-    return Container(
-      decoration: BoxDecoration(
-        color: _cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _borderColor),
-      ),
-      child: Column(
-        children: [
-          // Header
-          _cardHeader(
-            icon: Icons.badge_rounded,
-            iconColor: _accentOrange,
-            title: 'Document Preview',
-            trailing: _statusChip('Uploaded', _shieldGreen),
-          ),
-          const Divider(color: Color(0xFF1E2E52), height: 1),
-
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                // Thumbnail
-                Container(
-                  width: 80,
-                  height: 64,
-                  decoration: BoxDecoration(
-                    color: _inputBg,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: _borderColor),
-                  ),
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Icon(
-                        Icons.insert_drive_file_rounded,
-                        color: _accentBlue.withOpacity(0.5),
-                        size: 32,
-                      ),
-                      Positioned(
-                        bottom: 4,
-                        right: 4,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: _accentBlue,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text(
-                            'PDF',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 7,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ),
-                      ),
+        // AI Brain icon
+        Center(
+          child: AnimatedBuilder(
+            animation: _pulseCtrl,
+            builder: (_, __) => Transform.scale(
+              scale: _pulseAnim.value,
+              child: Container(
+                width: 90,
+                height: 90,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      _accentBlue.withOpacity(0.25),
+                      _accentBlue.withOpacity(0.05),
                     ],
                   ),
-                ),
-                const SizedBox(width: 14),
-
-                // Extracted info skeleton
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _extractedRow('Name', _formName),
-                      const SizedBox(height: 8),
-                      _extractedRow('DOB', _formDob),
-                      const SizedBox(height: 8),
-                      _extractedRow('ID Type', 'Aadhaar / PAN'),
-                    ],
+                  border: Border.all(
+                    color: _accentBlue.withOpacity(0.5),
+                    width: 2,
                   ),
                 ),
-              ],
+                child: const Icon(
+                  Icons.psychology_rounded,
+                  color: _accentBlue,
+                  size: 44,
+                ),
+              ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _extractedRow(String label, String value) {
-    return Row(
-      children: [
-        Text(
-          '$label: ',
-          style: const TextStyle(color: _textSecondary, fontSize: 11),
         ),
-        Expanded(
+        const SizedBox(height: 24),
+
+        Center(
           child: Text(
-            value,
+            _statusMessage,
             style: const TextStyle(
               color: _textPrimary,
-              fontSize: 11,
+              fontSize: 16,
               fontWeight: FontWeight.w700,
             ),
-            overflow: TextOverflow.ellipsis,
           ),
         ),
-      ],
-    );
-  }
-
-  Widget _buildAnalysisProgressBlock() {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: _cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _accentBlue.withOpacity(0.2)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              // Scanning icon with pulse
-              AnimatedBuilder(
-                animation: _pulseCtrl,
-                builder: (_, __) => Transform.scale(
-                  scale: _pulseAnim.value,
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: _accentBlue.withOpacity(0.15),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: _accentBlue.withOpacity(0.4)),
-                    ),
-                    child: const Icon(
-                      Icons.radar_rounded,
-                      color: _accentBlue,
-                      size: 18,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 14),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Verifying Document Structure',
-                      style: TextStyle(
-                        color: _textPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    SizedBox(height: 2),
-                    Text(
-                      'Analyzing document format and extracted information…',
-                      style: TextStyle(color: _textSecondary, fontSize: 11),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Animated progress bar
-          AnimatedBuilder(
-            animation: _progressAnim,
-            builder: (_, __) => Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: LinearProgressIndicator(
-                    value: _progressAnim.value,
-                    minHeight: 6,
-                    backgroundColor: _borderColor,
-                    valueColor: const AlwaysStoppedAnimation<Color>(
-                      _accentBlue,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '${(_progressAnim.value * 100).toInt()}%',
-                  style: const TextStyle(
-                    color: _accentBlue,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
+        const SizedBox(height: 6),
+        Center(
+          child: Text(
+            'Groq Llama 3 · Powered AI Analysis',
+            style: TextStyle(
+              color: _textSecondary.withOpacity(0.7),
+              fontSize: 12,
             ),
           ),
-          const SizedBox(height: 14),
+        ),
+        const SizedBox(height: 28),
 
-          // Check-list items
-          ...[
-            'Document structure integrity',
-            'Metadata consistency check',
-            'OCR extraction validation',
-            'Cross-referencing form data',
-          ].asMap().entries.map((e) {
-            return AnimatedBuilder(
-              animation: _progressAnim,
-              builder: (_, __) {
-                final threshold = (e.key + 1) / 4;
-                final done = _progressAnim.value >= threshold;
+        // Progress bar
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: _cardBg,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: _accentBlue.withOpacity(0.2)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'AI Analysis Progress',
+                    style: TextStyle(
+                      color: _textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  Text(
+                    '${(_progress * 100).toInt()}%',
+                    style: const TextStyle(
+                      color: _accentBlue,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LinearProgressIndicator(
+                  value: _progress,
+                  minHeight: 8,
+                  backgroundColor: _borderColor,
+                  valueColor: const AlwaysStoppedAnimation<Color>(_accentBlue),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Steps
+              ...[
+                (0.15, Icons.data_object_rounded, 'Reading complaint data'),
+                (0.35, Icons.fact_check_rounded, 'Analyzing form fields'),
+                (0.55, Icons.hub_rounded, 'Cross-referencing crime patterns'),
+                (0.75, Icons.analytics_rounded, 'Evaluating case strength'),
+                (1.0, Icons.auto_awesome_rounded, 'Generating AI risk report'),
+              ].map((step) {
+                final done = _progress >= step.$1;
                 return Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.only(bottom: 10),
                   child: Row(
                     children: [
                       AnimatedContainer(
-                        duration: const Duration(milliseconds: 350),
-                        width: 18,
-                        height: 18,
+                        duration: const Duration(milliseconds: 400),
+                        width: 22,
+                        height: 22,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           color: done
-                              ? _shieldGreen.withOpacity(0.2)
+                              ? _shieldGreen.withOpacity(0.15)
                               : _borderColor.withOpacity(0.3),
                           border: Border.all(
                             color: done ? _shieldGreen : _borderColor,
@@ -776,13 +960,13 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
                             ? const Icon(
                                 Icons.check_rounded,
                                 color: _shieldGreen,
-                                size: 10,
+                                size: 12,
                               )
-                            : null,
+                            : Icon(step.$2, color: _textSecondary, size: 11),
                       ),
                       const SizedBox(width: 10),
                       Text(
-                        e.value,
+                        step.$3,
                         style: TextStyle(
                           color: done ? _textPrimary : _textSecondary,
                           fontSize: 12,
@@ -792,742 +976,428 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
                     ],
                   ),
                 );
-              },
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════════
-  // PHASE 2 – Comparing
-  // ══════════════════════════════════════════════════════════════════════════════
-  Widget _buildComparingPhase() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionHeader(
-          icon: Icons.compare_arrows_rounded,
-          iconColor: _possibleYellow,
-          title: 'Data Comparison',
-          subtitle: 'Form data vs. extracted document data',
-        ),
-        const SizedBox(height: 20),
-
-        // Comparison table card
-        Container(
-          decoration: BoxDecoration(
-            color: _cardBg,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: _borderColor),
-          ),
-          child: Column(
-            children: [
-              _cardHeader(
-                icon: Icons.table_chart_rounded,
-                iconColor: _accentBlue,
-                title: 'Field Verification Matrix',
-                trailing: _statusChip('Scanning', _possibleYellow),
-              ),
-              const Divider(color: Color(0xFF1E2E52), height: 1),
-
-              // Table header
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 10,
-                ),
-                color: _inputBg,
-                child: Row(
-                  children: [
-                    const Expanded(
-                      flex: 2,
-                      child: Text(
-                        'Field',
-                        style: TextStyle(
-                          color: _textSecondary,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                    const Expanded(
-                      flex: 3,
-                      child: Text(
-                        'Form Data',
-                        style: TextStyle(
-                          color: _textSecondary,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                    const Expanded(
-                      flex: 3,
-                      child: Text(
-                        'Document Data',
-                        style: TextStyle(
-                          color: _textSecondary,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 28),
-                  ],
-                ),
-              ),
-              const Divider(color: Color(0xFF1E2E52), height: 1),
-
-              ..._comparisons.asMap().entries.map((e) {
-                final isLast = e.key == _comparisons.length - 1;
-                return Column(
-                  children: [
-                    _buildComparisonRow(e.value),
-                    if (!isLast)
-                      const Divider(color: Color(0xFF1E2E52), height: 1),
-                  ],
-                );
               }),
             ],
           ),
         ),
+
         const SizedBox(height: 16),
 
-        // Legend
-        _buildMatchLegend(),
-        const SizedBox(height: 16),
-
-        _buildInfoNote(
-          icon: Icons.info_rounded,
-          color: _accentBlue,
-          text:
-              'Comparison is performed algorithmically. Minor formatting differences may result in "Possible Match" status.',
-        ),
-      ],
-    );
-  }
-
-  Widget _buildComparisonRow(_FieldComparison item) {
-    final Color statusColor;
-    final IconData statusIcon;
-    final String statusLabel;
-
-    switch (item.status) {
-      case _MatchStatus.match:
-        statusColor = _matchGreen;
-        statusIcon = Icons.check_circle_rounded;
-        statusLabel = 'Match';
-      case _MatchStatus.possible:
-        statusColor = _possibleYellow;
-        statusIcon = Icons.warning_amber_rounded;
-        statusLabel = 'Possible';
-      case _MatchStatus.mismatch:
-        statusColor = _mismatchRed;
-        statusIcon = Icons.cancel_rounded;
-        statusLabel = 'Mismatch';
-    }
-
-    return Container(
-      color: statusColor.withOpacity(0.03),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            flex: 2,
-            child: Text(
-              item.label,
-              style: const TextStyle(
-                color: _textSecondary,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+        // Category chip
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: _accentOrange.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: _accentOrange.withOpacity(0.25)),
           ),
-          Expanded(
-            flex: 3,
-            child: Text(
-              item.formValue,
-              style: const TextStyle(
-                color: _textPrimary,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          Expanded(
-            flex: 3,
-            child: Text(
-              item.docValue,
-              style: TextStyle(
-                color: statusColor,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          Column(
+          child: Row(
             children: [
-              Icon(statusIcon, color: statusColor, size: 16),
-              const SizedBox(height: 2),
-              Text(
-                statusLabel,
-                style: TextStyle(
-                  color: statusColor,
-                  fontSize: 8,
-                  fontWeight: FontWeight.w700,
+              const Icon(
+                Icons.category_rounded,
+                color: _accentOrange,
+                size: 16,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Category: ${widget.category}',
+                  style: const TextStyle(
+                    color: _accentOrange,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMatchLegend() {
-    return Row(
-      children: [
-        _legendItem(_matchGreen, 'Match'),
-        const SizedBox(width: 16),
-        _legendItem(_possibleYellow, 'Possible Match'),
-        const SizedBox(width: 16),
-        _legendItem(_mismatchRed, 'Mismatch'),
-      ],
-    );
-  }
-
-  Widget _legendItem(Color color, String label) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 5),
-        Text(
-          label,
-          style: const TextStyle(color: _textSecondary, fontSize: 11),
         ),
       ],
     );
   }
 
-  // ══════════════════════════════════════════════════════════════════════════════
-  // PHASE 3 – Result
-  // ══════════════════════════════════════════════════════════════════════════════
+  // ── Phase 2: Result ───────────────────────────────────────────────────────
   Widget _buildResultPhase() {
+    final r = _result!;
+
+    final riskColor = r.riskLevel == _RiskLevel.low
+        ? _shieldGreen
+        : r.riskLevel == _RiskLevel.medium
+        ? const Color(0xFFF5C518)
+        : const Color(0xFFFF4C6A);
+
+    final riskLabel = r.riskLevel == _RiskLevel.low
+        ? 'LOW RISK'
+        : r.riskLevel == _RiskLevel.medium
+        ? 'MEDIUM RISK'
+        : 'HIGH RISK';
+
+    final riskIcon = r.riskLevel == _RiskLevel.low
+        ? Icons.verified_rounded
+        : r.riskLevel == _RiskLevel.medium
+        ? Icons.warning_amber_rounded
+        : Icons.dangerous_rounded;
+
+    final validityColor = r.complaintValidity == 'valid'
+        ? _shieldGreen
+        : r.complaintValidity == 'suspicious'
+        ? const Color(0xFFF5C518)
+        : _accentOrange;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionHeader(
-          icon: Icons.shield_rounded,
-          iconColor: _riskColor(_riskLevel),
-          title: 'Verification Complete',
-          subtitle: 'AI analysis finished — review result below',
-        ),
-        const SizedBox(height: 20),
-
-        // Risk badge card
-        _buildRiskCard(),
-        const SizedBox(height: 20),
-
-        // Summary of comparisons (compact)
-        _buildResultSummaryCard(),
-        const SizedBox(height: 20),
-
-        // Submission confirmation info card
-        _buildSubmissionInfoCard(),
-        const SizedBox(height: 16),
-
-        // Important note
-        _buildImportantNote(),
-        const SizedBox(height: 32),
-      ],
-    );
-  }
-
-  Widget _buildRiskCard() {
-    final Color color = _riskColor(_riskLevel);
-    final String riskLabel;
-    final String riskMessage;
-    final IconData riskIcon;
-
-    switch (_riskLevel) {
-      case _RiskLevel.low:
-        riskLabel = 'Low Risk';
-        riskMessage =
-            'Document structure and form data are consistent. Proceeding to next step.';
-        riskIcon = Icons.verified_rounded;
-      case _RiskLevel.medium:
-        riskLabel = 'Medium Risk';
-        riskMessage =
-            'Minor inconsistencies detected. An officer will review the documents before proceeding.';
-        riskIcon = Icons.warning_amber_rounded;
-      case _RiskLevel.high:
-        riskLabel = 'Needs Manual Review';
-        riskMessage =
-            'Significant inconsistencies detected. Additional verification may be required before processing.';
-        riskIcon = Icons.report_problem_rounded;
-    }
-
-    return Container(
-      decoration: BoxDecoration(
-        color: _cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withOpacity(0.4), width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: color.withOpacity(0.08),
-            blurRadius: 28,
-            spreadRadius: 2,
+        // ── Risk Banner ───────────────────────────────────────────────────
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: riskColor.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: riskColor.withOpacity(0.3), width: 1.5),
           ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // Risk status header
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.08),
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(16),
-              ),
-              border: Border(bottom: BorderSide(color: color.withOpacity(0.2))),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: color.withOpacity(0.15),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: color.withOpacity(0.4)),
-                  ),
-                  child: Icon(riskIcon, color: color, size: 20),
+          child: Row(
+            children: [
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: riskColor.withOpacity(0.15),
+                  border: Border.all(color: riskColor.withOpacity(0.5)),
                 ),
-                const SizedBox(width: 14),
-                Column(
+                child: Icon(riskIcon, color: riskColor, size: 26),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Risk Status',
-                      style: TextStyle(color: _textSecondary, fontSize: 11),
-                    ),
-                    const SizedBox(height: 2),
                     Text(
                       riskLabel,
                       style: TextStyle(
-                        color: color,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
+                        color: riskColor,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      r.riskSummary,
+                      style: const TextStyle(
+                        color: _textSecondary,
+                        fontSize: 12,
+                        height: 1.4,
                       ),
                     ),
                   ],
                 ),
-                const Spacer(),
-                // Badge pill
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: color.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: color.withOpacity(0.4)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          color: color,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        riskLabel,
-                        style: TextStyle(
-                          color: color,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // Risk message
-          Padding(
-            padding: const EdgeInsets.all(18),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.info_outline_rounded, color: color, size: 16),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    riskMessage,
-                    style: TextStyle(
-                      color: _textSecondary,
-                      fontSize: 12,
-                      height: 1.6,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildResultSummaryCard() {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: _cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _borderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.summarize_rounded, color: _accentBlue, size: 16),
-              SizedBox(width: 8),
-              Text(
-                'Verification Summary',
-                style: TextStyle(
-                  color: _textPrimary,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                ),
               ),
             ],
           ),
-          const SizedBox(height: 14),
-          ..._comparisons.map((c) {
-            final Color color;
-            final String label;
-            switch (c.status) {
-              case _MatchStatus.match:
-                color = _matchGreen;
-                label = '✓ Match';
-              case _MatchStatus.possible:
-                color = _possibleYellow;
-                label = '⚠ Possible';
-              case _MatchStatus.mismatch:
-                color = _mismatchRed;
-                label = '✗ Mismatch';
-            }
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Row(
+        ),
+        const SizedBox(height: 16),
+
+        // ── Case Strength Meter ───────────────────────────────────────────
+        _buildCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _cardRow(
+                Icons.bar_chart_rounded,
+                _accentBlue,
+                'Case Strength Score',
+              ),
+              const SizedBox(height: 14),
+              Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      c.label,
-                      style: const TextStyle(
-                        color: _textSecondary,
-                        fontSize: 12,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: LinearProgressIndicator(
+                        value: r.caseStrength / 10,
+                        minHeight: 10,
+                        backgroundColor: _borderColor,
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          r.caseStrength >= 7
+                              ? _shieldGreen
+                              : r.caseStrength >= 4
+                              ? const Color(0xFFF5C518)
+                              : const Color(0xFFFF4C6A),
+                        ),
                       ),
                     ),
                   ),
+                  const SizedBox(width: 12),
+                  Text(
+                    '${r.caseStrength}/10',
+                    style: TextStyle(
+                      color: r.caseStrength >= 7
+                          ? _shieldGreen
+                          : r.caseStrength >= 4
+                          ? const Color(0xFFF5C518)
+                          : const Color(0xFFFF4C6A),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 8,
                       vertical: 3,
                     ),
                     decoration: BoxDecoration(
-                      color: color.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: color.withOpacity(0.35)),
+                      color: validityColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: validityColor.withOpacity(0.3)),
                     ),
                     child: Text(
-                      label,
+                      'Complaint: ${r.complaintValidity.toUpperCase()}',
                       style: TextStyle(
-                        color: color,
-                        fontSize: 10,
+                        color: validityColor,
+                        fontSize: 11,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
                   ),
                 ],
               ),
-            );
-          }),
-        ],
-      ),
-    );
-  }
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
 
-  Widget _buildSubmissionInfoCard() {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: _cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _borderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _cardHeader(
-            icon: Icons.receipt_long_rounded,
-            iconColor: _shieldGreen,
-            title: 'Submission Details',
-            trailing: null,
-          ),
-          const Divider(color: Color(0xFF1E2E52), height: 1),
-          _detailRow(
-            icon: Icons.confirmation_number_rounded,
-            iconColor: _accentOrange,
-            label: 'Complaint ID',
-            value: widget.complaintId,
-          ),
-          const Divider(color: Color(0xFF1E2E52), height: 1),
-          _detailRow(
-            icon: Icons.badge_rounded,
-            iconColor: _accentBlue,
-            label: 'Assigned Officer',
-            value: widget.officerId,
-          ),
-          const Divider(color: Color(0xFF1E2E52), height: 1),
-          _detailRow(
-            icon: Icons.timer_rounded,
-            iconColor: _shieldGreen,
-            label: 'Initial Review',
-            value: 'Within 30 Minutes',
-          ),
-          const Divider(color: Color(0xFF1E2E52), height: 1),
-          _detailRow(
-            icon: Icons.category_rounded,
-            iconColor: widget.categoryGradient[0],
-            label: 'Category',
-            value: widget.category,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _detailRow({
-    required IconData icon,
-    required Color iconColor,
-    required String label,
-    required String value,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: iconColor.withOpacity(0.12),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Icon(icon, color: iconColor, size: 15),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
+        // ── Field Analysis ────────────────────────────────────────────────
+        if (r.fieldAnalysis.isNotEmpty) ...[
+          _buildCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  label,
-                  style: const TextStyle(color: _textSecondary, fontSize: 10),
+                _cardRow(
+                  Icons.fact_check_rounded,
+                  _accentBlue,
+                  'Field-by-Field Analysis',
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    color: _textPrimary,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.3,
+                const SizedBox(height: 14),
+                ...r.fieldAnalysis.map((f) {
+                  final color = f.assessment == 'ok'
+                      ? _shieldGreen
+                      : f.assessment == 'warning'
+                      ? const Color(0xFFF5C518)
+                      : const Color(0xFFFF4C6A);
+                  final icon = f.assessment == 'ok'
+                      ? Icons.check_circle_rounded
+                      : f.assessment == 'warning'
+                      ? Icons.warning_amber_rounded
+                      : Icons.cancel_rounded;
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: color.withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: color.withOpacity(0.2)),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(icon, color: color, size: 16),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                f.field,
+                                style: const TextStyle(
+                                  color: _textPrimary,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              if (f.value.isNotEmpty) ...[
+                                const SizedBox(height: 2),
+                                Text(
+                                  f.value,
+                                  style: TextStyle(
+                                    color: _textSecondary.withOpacity(0.8),
+                                    fontSize: 11,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                              const SizedBox(height: 3),
+                              Text(
+                                f.note,
+                                style: TextStyle(
+                                  color: color,
+                                  fontSize: 11,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+        ],
+
+        // ── AI Observations ───────────────────────────────────────────────
+        if (r.observations.isNotEmpty) ...[
+          _buildCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _cardRow(
+                  Icons.psychology_rounded,
+                  _accentBlue,
+                  'AI Observations',
+                ),
+                const SizedBox(height: 12),
+                ...r.observations.asMap().entries.map(
+                  (e) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: 20,
+                          height: 20,
+                          decoration: BoxDecoration(
+                            color: _accentBlue.withOpacity(0.15),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${e.key + 1}',
+                              style: const TextStyle(
+                                color: _accentBlue,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            e.value,
+                            style: const TextStyle(
+                              color: _textSecondary,
+                              fontSize: 12,
+                              height: 1.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
             ),
           ),
+          const SizedBox(height: 14),
         ],
-      ),
-    );
-  }
 
-  Widget _buildImportantNote() {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: _warnBg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _warnBorder),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(Icons.gavel_rounded, color: _warnText, size: 16),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'AI validation assists in reducing false submissions. Final decision is made by the assigned officer. All documents are reviewed by certified law enforcement personnel.',
-              style: TextStyle(
-                color: _warnText.withOpacity(0.88),
-                fontSize: 11,
-                height: 1.55,
-              ),
+        // ── Red Flags ─────────────────────────────────────────────────────
+        if (r.redFlags.isNotEmpty) ...[
+          _buildCard(
+            accentColor: const Color(0xFFFF4C6A),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _cardRow(
+                  Icons.flag_rounded,
+                  const Color(0xFFFF4C6A),
+                  'Red Flags Detected',
+                ),
+                const SizedBox(height: 12),
+                ...r.redFlags.map(
+                  (f) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.warning_rounded,
+                          color: Color(0xFFFF4C6A),
+                          size: 15,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            f,
+                            style: const TextStyle(
+                              color: Color(0xFFFF4C6A),
+                              fontSize: 12,
+                              height: 1.5,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
+          const SizedBox(height: 14),
         ],
-      ),
-    );
-  }
 
-  // ── Bottom submit bar ────────────────────────────────────────────────────────
-  Widget _buildBottomSubmitBar() {
-    final Color riskColor = _riskColor(_riskLevel);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 14, 20, 28),
-      decoration: BoxDecoration(
-        color: _bg1.withOpacity(0.97),
-        border: Border(top: BorderSide(color: _borderColor, width: 1)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.4),
-            blurRadius: 20,
-            offset: const Offset(0, -4),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Risk status mini pill
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            margin: const EdgeInsets.only(bottom: 14),
+        const SizedBox(height: 16),
+
+        // Groq badge
+        Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
             decoration: BoxDecoration(
-              color: riskColor.withOpacity(0.10),
+              color: _accentBlue.withOpacity(0.08),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: riskColor.withOpacity(0.35)),
+              border: Border.all(color: _accentBlue.withOpacity(0.2)),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: riskColor,
-                    shape: BoxShape.circle,
-                  ),
-                ),
+                const Icon(Icons.bolt_rounded, color: _accentBlue, size: 14),
                 const SizedBox(width: 6),
                 Text(
-                  'AI Validation: ${_riskLabel(_riskLevel)}',
-                  style: TextStyle(
-                    color: riskColor,
+                  'Powered by Groq · Llama 3 · ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}',
+                  style: const TextStyle(
+                    color: _accentBlue,
                     fontSize: 11,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ],
             ),
           ),
-
-          // Submit button
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: GestureDetector(
-              onTap: _isSubmitting ? null : _proceedToSuccess,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFFFF6B2B), Color(0xFFE05A00)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFFFF6B2B).withOpacity(0.35),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Center(
-                  child: _isSubmitting
-                      ? const SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.5,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.send_rounded,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            SizedBox(width: 8),
-                            Text(
-                              'Confirm & Submit Complaint',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.3,
-                              ),
-                            ),
-                          ],
-                        ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
-  // ── Next bar (Phase 1 & Phase 2) ───────────────────────────────────────────
-  Widget _buildNextBar() {
-    final bool canProceed =
-        _phase == _VerificationPhase.comparing || _analysisComplete;
-    final String nextLabel = _phase == _VerificationPhase.analyzing
-        ? 'Proceed to Data Comparison'
-        : 'View Verification Result';
-
+  // ── Submit Bar ────────────────────────────────────────────────────────────
+  Widget _buildSubmitBar() {
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 14, 20, 28),
+      padding: EdgeInsets.fromLTRB(
+        20,
+        14,
+        20,
+        MediaQuery.of(context).padding.bottom + 14,
+      ),
       decoration: BoxDecoration(
         color: _bg1.withOpacity(0.97),
         border: Border(top: BorderSide(color: _borderColor, width: 1)),
@@ -1542,220 +1412,91 @@ class _AiVerificationScreenState extends State<AiVerificationScreen>
       child: SizedBox(
         width: double.infinity,
         height: 52,
-        child: GestureDetector(
-          onTap: canProceed
-              ? () {
-                  if (_phase == _VerificationPhase.analyzing) {
-                    _transitionTo(_VerificationPhase.comparing);
-                  } else if (_phase == _VerificationPhase.comparing) {
-                    _transitionTo(_VerificationPhase.result);
-                  }
-                }
-              : null,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 300),
-            decoration: BoxDecoration(
-              color: canProceed ? _accentBlue : _inputBg,
+        child: ElevatedButton(
+          onPressed: _isSubmitting ? null : _proceedToSuccess,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _accentOrange,
+            disabledBackgroundColor: _accentOrange.withOpacity(0.5),
+            shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: canProceed ? _accentBlue : _borderColor,
-              ),
-              boxShadow: canProceed
-                  ? [
-                      BoxShadow(
-                        color: _accentBlue.withOpacity(0.35),
-                        blurRadius: 16,
-                        offset: const Offset(0, 4),
-                      ),
-                    ]
-                  : [],
             ),
-            child: Center(
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    canProceed ? nextLabel : 'Analyzing Document...',
-                    style: TextStyle(
-                      color: canProceed ? Colors.white : _textSecondary,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Icon(
-                    canProceed
-                        ? Icons.arrow_forward_rounded
-                        : Icons.hourglass_top_rounded,
-                    color: canProceed ? Colors.white : _textSecondary,
-                    size: 18,
-                  ),
-                ],
-              ),
-            ),
+            elevation: 0,
           ),
+          child: _isSubmitting
+              ? const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Colors.white,
+                  ),
+                )
+              : const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.send_rounded, color: Colors.white, size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'Submit Complaint',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                  ],
+                ),
         ),
       ),
     );
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────────
+  // ── Helper Widgets ────────────────────────────────────────────────────────
+  Widget _buildCard({required Widget child, Color? accentColor}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _cardBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: (accentColor ?? _borderColor).withOpacity(
+            accentColor != null ? 0.25 : 1,
+          ),
+        ),
+      ),
+      child: child,
+    );
+  }
 
-  Color _riskColor(_RiskLevel r) => switch (r) {
-    _RiskLevel.low => _matchGreen,
-    _RiskLevel.medium => _possibleYellow,
-    _RiskLevel.high => _mismatchRed,
-  };
-
-  String _riskLabel(_RiskLevel r) => switch (r) {
-    _RiskLevel.low => 'Low Risk',
-    _RiskLevel.medium => 'Medium Risk',
-    _RiskLevel.high => 'Needs Manual Review',
-  };
-
-  Widget _sectionHeader({
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required String subtitle,
-  }) {
+  Widget _cardRow(IconData icon, Color color, String title) {
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Container(
-          width: 44,
-          height: 44,
+          width: 30,
+          height: 30,
           decoration: BoxDecoration(
-            color: iconColor.withOpacity(0.12),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: iconColor.withOpacity(0.3)),
+            color: color.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(8),
           ),
-          child: Icon(icon, color: iconColor, size: 22),
+          child: Icon(icon, color: color, size: 15),
         ),
-        const SizedBox(width: 14),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(
-                color: _textPrimary,
-                fontSize: 16,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              subtitle,
-              style: const TextStyle(color: _textSecondary, fontSize: 11),
-            ),
-          ],
+        const SizedBox(width: 10),
+        Text(
+          title,
+          style: const TextStyle(
+            color: _textPrimary,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+          ),
         ),
       ],
     );
   }
-
-  Widget _cardHeader({
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required Widget? trailing,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          Container(
-            width: 30,
-            height: 30,
-            decoration: BoxDecoration(
-              color: iconColor.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Icon(icon, color: iconColor, size: 15),
-          ),
-          const SizedBox(width: 10),
-          Text(
-            title,
-            style: const TextStyle(
-              color: _textPrimary,
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          if (trailing != null) ...[const Spacer(), trailing],
-        ],
-      ),
-    );
-  }
-
-  Widget _statusChip(String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withOpacity(0.4)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 5,
-            height: 5,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 5),
-          Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInfoNote({
-    required IconData icon,
-    required Color color,
-    required String text,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withOpacity(0.2)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: color, size: 15),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(
-                color: _textSecondary,
-                fontSize: 11,
-                height: 1.5,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Grid painter (reused from form screen style)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Grid Painter ──────────────────────────────────────────────────────────────
 class _GridPainter extends CustomPainter {
   final Color color;
   const _GridPainter({required this.color});

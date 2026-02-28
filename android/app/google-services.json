@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "575561651069",
+    "project_id": "shieldx-fb646",
+    "storage_bucket": "shieldx-fb646.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:575561651069:android:853e7ea69a9be319833214",
+        "android_client_info": {
+          "package_name": "com.ritik.shieldx"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA5dLBrQF2mNkD-xTBjxZkqZQbsSnBK3iQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

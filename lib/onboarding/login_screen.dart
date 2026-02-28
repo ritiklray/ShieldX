@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'otp_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -67,34 +68,56 @@ class _LoginScreenState extends State<LoginScreen>
     super.dispose();
   }
 
+  // ── Firebase: Send OTP ────────────────────────────────────────────────────
   Future<void> _sendOtp() async {
     if (_phoneController.text.length < 10) {
       _showSnack('Please enter a valid 10-digit mobile number');
       return;
     }
+
     setState(() => _isLoading = true);
-    await Future.delayed(const Duration(seconds: 2));
-    if (!mounted) return;
-    setState(() => _isLoading = false);
-    Navigator.push(
-      context,
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 500),
-        pageBuilder: (_, __, ___) =>
-            OtpScreen(phoneNumber: _phoneController.text),
-        transitionsBuilder: (_, animation, __, child) {
-          return SlideTransition(
-            position: Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
-                .animate(
-                  CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                  ),
-                ),
-            child: child,
-          );
-        },
-      ),
+
+    await FirebaseAuth.instance.verifyPhoneNumber(
+      phoneNumber: '+91${_phoneController.text}',
+      verificationCompleted: (PhoneAuthCredential credential) async {
+        // Auto-verification on some devices
+        await FirebaseAuth.instance.signInWithCredential(credential);
+      },
+      verificationFailed: (FirebaseAuthException e) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        _showSnack(e.message ?? 'Verification failed. Please try again.');
+      },
+      codeSent: (String verificationId, int? resendToken) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        Navigator.push(
+          context,
+          PageRouteBuilder(
+            transitionDuration: const Duration(milliseconds: 500),
+            pageBuilder: (_, __, ___) => OtpScreen(
+              phoneNumber: _phoneController.text,
+              verificationId: verificationId,
+            ),
+            transitionsBuilder: (_, animation, __, child) {
+              return SlideTransition(
+                position:
+                    Tween<Offset>(
+                      begin: const Offset(1, 0),
+                      end: Offset.zero,
+                    ).animate(
+                      CurvedAnimation(
+                        parent: animation,
+                        curve: Curves.easeOutCubic,
+                      ),
+                    ),
+                child: child,
+              );
+            },
+          ),
+        );
+      },
+      codeAutoRetrievalTimeout: (String verificationId) {},
     );
   }
 
@@ -109,13 +132,14 @@ class _LoginScreenState extends State<LoginScreen>
     );
   }
 
+  // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _bg1,
       body: Stack(
         children: [
-          // ── Background gradient ─────────────────────────────────────────────
+          // Background gradient
           Container(
             decoration: const BoxDecoration(
               gradient: RadialGradient(
@@ -127,7 +151,7 @@ class _LoginScreenState extends State<LoginScreen>
             ),
           ),
 
-          // ── Glow blobs ─────────────────────────────────────────────────────
+          // Glow blobs
           Positioned(
             top: -60,
             right: -50,
@@ -139,13 +163,13 @@ class _LoginScreenState extends State<LoginScreen>
             child: _glowBlob(260, _accentOrange.withOpacity(0.10)),
           ),
 
-          // ── Grid overlay ───────────────────────────────────────────────────
+          // Grid overlay
           CustomPaint(
             size: MediaQuery.of(context).size,
             painter: _GridPainter(color: _accentBlue.withOpacity(0.04)),
           ),
 
-          // ── Scrollable body ────────────────────────────────────────────────
+          // Scrollable body
           SafeArea(
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -158,7 +182,7 @@ class _LoginScreenState extends State<LoginScreen>
                     children: [
                       const SizedBox(height: 40),
 
-                      // ── Logo row ──────────────────────────────────────────
+                      // Logo row
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -215,7 +239,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                       const SizedBox(height: 36),
 
-                      // ── Card ──────────────────────────────────────────────
+                      // Card
                       Container(
                         width: double.infinity,
                         padding: const EdgeInsets.all(28),
@@ -310,7 +334,6 @@ class _LoginScreenState extends State<LoginScreen>
 
                             const SizedBox(height: 22),
 
-                            // Title
                             const Center(
                               child: Text(
                                 'Secure Login',
@@ -335,12 +358,9 @@ class _LoginScreenState extends State<LoginScreen>
 
                             const SizedBox(height: 28),
 
-                            // Divider
                             Container(height: 1, color: _borderColor),
-
                             const SizedBox(height: 24),
 
-                            // Label
                             const Text(
                               'Mobile Number',
                               style: TextStyle(
@@ -376,13 +396,12 @@ class _LoginScreenState extends State<LoginScreen>
                               ),
                               child: Row(
                                 children: [
-                                  // Country code
                                   Container(
                                     padding: const EdgeInsets.symmetric(
                                       horizontal: 14,
                                       vertical: 16,
                                     ),
-                                    decoration: BoxDecoration(
+                                    decoration: const BoxDecoration(
                                       border: Border(
                                         right: BorderSide(
                                           color: _borderColor,
@@ -409,7 +428,6 @@ class _LoginScreenState extends State<LoginScreen>
                                       ],
                                     ),
                                   ),
-                                  // Number input
                                   Expanded(
                                     child: TextField(
                                       controller: _phoneController,
@@ -508,7 +526,6 @@ class _LoginScreenState extends State<LoginScreen>
 
                             const SizedBox(height: 18),
 
-                            // Terms
                             Center(
                               child: Text(
                                 'By continuing, you agree to our Terms & Conditions\nand Privacy Policy',
@@ -526,7 +543,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                       const SizedBox(height: 24),
 
-                      // ── Security note ─────────────────────────────────────
+                      // Security note
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 18,
@@ -565,7 +582,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                       const SizedBox(height: 32),
 
-                      // ── Bottom stat strip ─────────────────────────────────
+                      // Bottom stat strip
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
@@ -632,7 +649,7 @@ class _LoginScreenState extends State<LoginScreen>
   }
 }
 
-// ── Grid painter ──────────────────────────────────────────────────────────────
+// Grid painter
 class _GridPainter extends CustomPainter {
   final Color color;
   const _GridPainter({required this.color});

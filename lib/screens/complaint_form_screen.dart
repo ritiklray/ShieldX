@@ -62,7 +62,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe the incident in detail…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'bank_name',
@@ -158,7 +158,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe what happened…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'gov_id',
@@ -219,7 +219,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe the job scam in detail…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'gov_id',
@@ -282,7 +282,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe the harassment in detail…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'gov_id',
@@ -334,7 +334,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe how the account is fake or impersonating you…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'gov_id',
@@ -385,7 +385,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe the photo/content misuse in detail…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'gov_id',
@@ -456,7 +456,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe the blackmail/threat in detail…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'gov_id',
@@ -492,7 +492,7 @@ Map<String, List<FormFieldConfig>> categoryFields = {
       label: 'Detailed Description',
       type: FieldType.textarea,
       hint: 'Describe the incident in detail…',
-      minChars: 200,
+      minChars: 0,
     ),
     FormFieldConfig(
       id: 'gov_id',
@@ -600,9 +600,6 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
       if (field.type == FieldType.textarea) {
         final val = _textControllers[field.id]?.text.trim() ?? '';
         if (val.isEmpty) valid = false;
-        if (field.minChars != null && val.length < field.minChars!) {
-          valid = false;
-        }
       }
       if (field.type == FieldType.dropdown ||
           field.type == FieldType.date ||
@@ -659,6 +656,10 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
           officerId: officerId,
           category: widget.category,
           categoryGradient: widget.categoryGradient,
+          formData: {
+            ..._formValues.map((k, v) => MapEntry(k, v?.toString() ?? '')),
+            ..._textControllers.map((k, v) => MapEntry(k, v.text.trim())),
+          },
         ),
         transitionsBuilder: (_, animation, __, child) {
           return FadeTransition(
@@ -1145,39 +1146,6 @@ class _ComplaintFormScreenState extends State<ComplaintFormScreen>
           FieldType.toggle => _buildToggle(field),
           FieldType.radio => _buildRadio(field),
         },
-
-        // Min chars helper
-        if (field.type == FieldType.textarea && field.minChars != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: ValueListenableBuilder<TextEditingValue>(
-              valueListenable: _textControllers[field.id]!,
-              builder: (_, val, __) {
-                final len = val.text.length;
-                final enough = len >= field.minChars!;
-                return Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    Icon(
-                      enough
-                          ? Icons.check_circle_rounded
-                          : Icons.info_outline_rounded,
-                      color: enough ? _shieldGreen : _textSecondary,
-                      size: 12,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '$len / ${field.minChars} min characters',
-                      style: TextStyle(
-                        color: enough ? _shieldGreen : _textSecondary,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-          ),
       ],
     );
   }

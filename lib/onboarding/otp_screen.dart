@@ -1,11 +1,18 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../screens/ai_document_assistant_screen.dart';
 
 class OtpScreen extends StatefulWidget {
   final String phoneNumber;
-  const OtpScreen({super.key, required this.phoneNumber});
+  final String verificationId;
+
+  const OtpScreen({
+    super.key,
+    required this.phoneNumber,
+    required this.verificationId,
+  });
 
   @override
   State<OtpScreen> createState() => _OtpScreenState();
@@ -40,7 +47,7 @@ class _OtpScreenState extends State<OtpScreen>
   late final Animation<double> _fadeAnim;
   late final Animation<Offset> _slideAnim;
 
-  // ── ShieldX colors ────────────────────────────────────────────────────────
+  // ── Colors ────────────────────────────────────────────────────────────────
   static const Color _bg1 = Color(0xFF0A0F1E);
   static const Color _bg2 = Color(0xFF0D1B3E);
   static const Color _bg3 = Color(0xFF112250);
@@ -58,7 +65,6 @@ class _OtpScreenState extends State<OtpScreen>
   void initState() {
     super.initState();
 
-    // Entry animation
     _entryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
@@ -75,7 +81,6 @@ class _OtpScreenState extends State<OtpScreen>
     _entryController.forward();
     _startResendTimer();
 
-    // Auto-focus first box
     WidgetsBinding.instance.addPostFrameCallback((_) {
       FocusScope.of(context).requestFocus(_focusNodes[0]);
     });
@@ -90,7 +95,7 @@ class _OtpScreenState extends State<OtpScreen>
     super.dispose();
   }
 
-  // ── Timer ──────────────────────────────────────────────────────────────────
+  // ── Timer ─────────────────────────────────────────────────────────────────
   void _startResendTimer() {
     _resendSeconds = 30;
     _canResend = false;
@@ -105,17 +110,14 @@ class _OtpScreenState extends State<OtpScreen>
     });
   }
 
-  // ── Input handling ─────────────────────────────────────────────────────────
+  // ── Input handling ────────────────────────────────────────────────────────
   void _onDigitChanged(int index, String value) {
     setState(() => _hasError = false);
-
     if (value.isNotEmpty) {
-      // Move forward
       if (index < _otpLength - 1) {
         FocusScope.of(context).requestFocus(_focusNodes[index + 1]);
       } else {
         _focusNodes[index].unfocus();
-        // Auto-verify when last digit typed
         _verifyOtp();
       }
     }
@@ -132,10 +134,9 @@ class _OtpScreenState extends State<OtpScreen>
   }
 
   String get _fullOtp => _controllers.map((c) => c.text).join();
-
   bool get _isOtpComplete => _fullOtp.length == _otpLength;
 
-  // ── Verify ─────────────────────────────────────────────────────────────────
+  // ── Firebase: Verify OTP ──────────────────────────────────────────────────
   Future<void> _verifyOtp() async {
     if (!_isOtpComplete) {
       setState(() {
@@ -150,52 +151,53 @@ class _OtpScreenState extends State<OtpScreen>
       _hasError = false;
     });
 
-    // Simulate network call
-    await Future.delayed(const Duration(seconds: 2));
+    try {
+      final credential = PhoneAuthProvider.credential(
+        verificationId: widget.verificationId,
+        smsCode: _fullOtp,
+      );
 
-    if (!mounted) return;
+      await FirebaseAuth.instance.signInWithCredential(credential);
 
-    // Demo: OTP 123456 = success, anything else = error
-    if (_fullOtp == '123456') {
+      if (!mounted) return;
+
       setState(() {
         _isVerifying = false;
         _isSuccess = true;
       });
-      await Future.delayed(const Duration(milliseconds: 1200));
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 600),
-            pageBuilder: (_, __, ___) => const AiDocumentAssistantScreen(),
-            transitionsBuilder: (_, animation, __, child) {
-              return FadeTransition(
-                opacity: CurvedAnimation(
-                  parent: animation,
-                  curve: Curves.easeIn,
-                ),
-                child: ScaleTransition(
-                  scale: Tween<double>(begin: 0.96, end: 1.0).animate(
-                    CurvedAnimation(
-                      parent: animation,
-                      curve: Curves.easeOutCubic,
-                    ),
+
+      await Future.delayed(const Duration(milliseconds: 1000));
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        PageRouteBuilder(
+          transitionDuration: const Duration(milliseconds: 600),
+          pageBuilder: (_, __, ___) => const AiDocumentAssistantScreen(),
+          transitionsBuilder: (_, animation, __, child) {
+            return FadeTransition(
+              opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
+              child: ScaleTransition(
+                scale: Tween<double>(begin: 0.96, end: 1.0).animate(
+                  CurvedAnimation(
+                    parent: animation,
+                    curve: Curves.easeOutCubic,
                   ),
-                  child: child,
                 ),
-              );
-            },
-          ),
-        );
-      }
-    } else {
+                child: child,
+              ),
+            );
+          },
+        ),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
       setState(() {
         _isVerifying = false;
         _hasError = true;
-        _errorMsg = 'Incorrect OTP. Please try again.';
+        _errorMsg = e.message ?? 'Invalid OTP. Please try again.';
         _isSuccess = false;
       });
-      // Shake & clear
       for (final c in _controllers) c.clear();
       FocusScope.of(context).requestFocus(_focusNodes[0]);
     }
@@ -220,7 +222,7 @@ class _OtpScreenState extends State<OtpScreen>
     );
   }
 
-  // ── Build ──────────────────────────────────────────────────────────────────
+  // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -270,7 +272,7 @@ class _OtpScreenState extends State<OtpScreen>
                     children: [
                       const SizedBox(height: 24),
 
-                      // ── Back + Logo ──────────────────────────────────────
+                      // Back + Logo
                       Row(
                         children: [
                           GestureDetector(
@@ -314,13 +316,13 @@ class _OtpScreenState extends State<OtpScreen>
                             ),
                           ),
                           const Spacer(),
-                          const SizedBox(width: 40), // balance
+                          const SizedBox(width: 40),
                         ],
                       ),
 
                       const SizedBox(height: 32),
 
-                      // ── Shield icon with rings ───────────────────────────
+                      // Shield icon
                       SizedBox(
                         width: 120,
                         height: 120,
@@ -384,7 +386,6 @@ class _OtpScreenState extends State<OtpScreen>
 
                       const SizedBox(height: 24),
 
-                      // ── Heading ──────────────────────────────────────────
                       Text(
                         _isSuccess ? 'Verified! 🎉' : 'OTP Verification',
                         style: const TextStyle(
@@ -418,7 +419,7 @@ class _OtpScreenState extends State<OtpScreen>
 
                       const SizedBox(height: 36),
 
-                      // ── OTP Card ─────────────────────────────────────────
+                      // OTP Card
                       Container(
                         width: double.infinity,
                         padding: const EdgeInsets.all(28),
@@ -455,7 +456,6 @@ class _OtpScreenState extends State<OtpScreen>
                         ),
                         child: Column(
                           children: [
-                            // Label
                             const Align(
                               alignment: Alignment.centerLeft,
                               child: Text(
@@ -470,12 +470,13 @@ class _OtpScreenState extends State<OtpScreen>
                             ),
                             const SizedBox(height: 16),
 
-                            // ── 6 OTP boxes ─────────────────────────────
+                            // 6 OTP boxes
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: List.generate(_otpLength, (i) {
-                                return _buildOtpBox(i);
-                              }),
+                              children: List.generate(
+                                _otpLength,
+                                (i) => _buildOtpBox(i),
+                              ),
                             ),
 
                             // Error message
@@ -492,12 +493,14 @@ class _OtpScreenState extends State<OtpScreen>
                                             size: 14,
                                           ),
                                           const SizedBox(width: 6),
-                                          Text(
-                                            _errorMsg,
-                                            style: const TextStyle(
-                                              color: _errorRed,
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.w500,
+                                          Expanded(
+                                            child: Text(
+                                              _errorMsg,
+                                              style: const TextStyle(
+                                                color: _errorRed,
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w500,
+                                              ),
                                             ),
                                           ),
                                         ],
@@ -508,7 +511,7 @@ class _OtpScreenState extends State<OtpScreen>
 
                             const SizedBox(height: 24),
 
-                            // ── Submit button ────────────────────────────
+                            // Verify button
                             SizedBox(
                               width: double.infinity,
                               height: 54,
@@ -592,7 +595,7 @@ class _OtpScreenState extends State<OtpScreen>
 
                       const SizedBox(height: 24),
 
-                      // ── Resend row ───────────────────────────────────────
+                      // Resend row
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -630,7 +633,7 @@ class _OtpScreenState extends State<OtpScreen>
 
                       const SizedBox(height: 28),
 
-                      // ── Security badge ───────────────────────────────────
+                      // Security badge
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 16,
@@ -664,27 +667,6 @@ class _OtpScreenState extends State<OtpScreen>
                         ),
                       ),
 
-                      const SizedBox(height: 32),
-
-                      // Demo hint
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: _accentBlue.withOpacity(0.06),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: _accentBlue.withOpacity(0.15),
-                          ),
-                        ),
-                        child: const Text(
-                          '💡 Demo: Use OTP  123456  to verify',
-                          style: TextStyle(color: _textSecondary, fontSize: 12),
-                        ),
-                      ),
-
                       const SizedBox(height: 40),
                     ],
                   ),
@@ -697,7 +679,7 @@ class _OtpScreenState extends State<OtpScreen>
     );
   }
 
-  // ── Single OTP box ─────────────────────────────────────────────────────────
+  // ── Single OTP box ────────────────────────────────────────────────────────
   Widget _buildOtpBox(int index) {
     return KeyboardListener(
       focusNode: FocusNode(),
@@ -778,7 +760,7 @@ class _OtpScreenState extends State<OtpScreen>
   }
 }
 
-// ── Grid painter ──────────────────────────────────────────────────────────────
+// Grid painter
 class _GridPainter extends CustomPainter {
   final Color color;
   const _GridPainter({required this.color});
