@@ -9,7 +9,7 @@ import 'complaint_success_screen.dart';
 
 class _GroqService {
   static const String _apiKey =
-      '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';
+      'YOUR_GROQ_API_KEY_HERE'; // Replace with your actual Groq API Key
   static const String _model =
       'llama3-70b-8192'; // Upgraded to 70B for better reasoning
   static const String _endpoint =
