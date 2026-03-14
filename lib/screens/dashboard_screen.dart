@@ -9,6 +9,7 @@ import 'officer_chat_screen.dart';
 import 'ai_guardian_screen.dart';
 import 'sos_screen.dart';
 import 'guardian_permission_dialog.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 
 // ── Tab enum ──────────────────────────────────────────────────────────────────
 enum DashboardTab { file, track }
@@ -51,6 +52,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   // ── AI Guardian Protection ─────────────────────────────────────────────────
   bool _guardianEnabled = false;
+  String _emergencyNumber = '';
 
   // ── Colors ─────────────────────────────────────────────────────────────────
   static const Color _bg1 = Color(0xFF0A0F1E);
@@ -134,8 +136,91 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (mounted) {
       setState(() {
         _guardianEnabled = prefs.getBool('guardian_enabled') ?? false;
+        _emergencyNumber = prefs.getString('emergency_number') ?? '';
       });
     }
+  }
+
+  // ── Emergency Number Dialog ───────────────────────────────────────────────────
+  Future<String?> _showEmergencyNumberDialog() async {
+    final controller = TextEditingController(text: _emergencyNumber);
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: const [
+            Icon(Icons.phone_in_talk_rounded, color: _shieldGreen, size: 22),
+            SizedBox(width: 10),
+            Text(
+              'Emergency Number',
+              style: TextStyle(
+                color: _textPrimary,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Enter the phone number to call & SMS when SOS is triggered.',
+              style: TextStyle(color: _textSecondary, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.phone,
+              autofocus: true,
+              style: const TextStyle(color: _textPrimary, fontSize: 16),
+              decoration: InputDecoration(
+                hintText: 'e.g. 9876543210',
+                hintStyle: const TextStyle(color: _textSecondary),
+                prefixIcon: const Icon(Icons.phone_rounded, color: _shieldGreen, size: 18),
+                filled: true,
+                fillColor: _inputBg,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: _borderColor),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: _shieldGreen, width: 1.5),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: _borderColor),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: const Text('Cancel', style: TextStyle(color: _textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _shieldGreen,
+              foregroundColor: Colors.black,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () {
+              final num = controller.text.trim();
+              if (num.isEmpty) return;
+              Navigator.pop(ctx, num);
+            },
+            child: const Text('Save & Enable', style: TextStyle(fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
   }
 
   // ── Navigate to complaint form ─────────────────────────────────────────────
@@ -641,9 +726,26 @@ class _DashboardScreenState extends State<DashboardScreen>
                           context,
                         );
                         if (granted == true) {
-                          setState(() => _guardianEnabled = true);
+                          if (!mounted) return;
+                          // Ask for emergency number
+                          final number = await _showEmergencyNumberDialog();
+                          if (!mounted) return;
+                          if (number == null || number.isEmpty) return;
+                          final prefs = await SharedPreferences.getInstance();
+                          await prefs.setString('emergency_number', number);
+                          await prefs.setBool('guardian_enabled', true);
+                          FlutterBackgroundService().startService();
+                          if (!mounted) return;
+                          setState(() {
+                            _emergencyNumber = number;
+                            _guardianEnabled = true;
+                          });
                         }
                       } else {
+                        final prefs = await SharedPreferences.getInstance();
+                        await prefs.setBool('guardian_enabled', false);
+                        FlutterBackgroundService().invoke('stopService');
+                        if (!mounted) return;
                         setState(() => _guardianEnabled = false);
                       }
                     },

@@ -131,7 +131,7 @@ class _GuardianPermissionModal extends StatelessWidget {
             color: errorRed,
             title: 'Auto Action',
             desc:
-                'Immediately calls SOS 8104007561, shares your live location & alerts contacts.',
+                'Immediately calls your emergency contact, shares your live location & alerts contacts.',
             cardBg: cardBg,
             textPrimary: textPrimary,
             textSecondary: textSecondary,

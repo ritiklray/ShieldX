@@ -27,6 +27,7 @@ class _AiGuardianScreenState extends State<AiGuardianScreen>
   bool _guardianEnabled = false;
   bool _voiceMonitoring = true;
   bool _motionMonitoring = true;
+  String _emergencyNumber = '';
 
   // ── Danger score (0–15) ───────────────────────────────────────────────────
   double _dangerScore = 0;
@@ -89,6 +90,7 @@ class _AiGuardianScreenState extends State<AiGuardianScreen>
       end: 0,
     ).animate(CurvedAnimation(parent: _scoreCtrl, curve: Curves.easeOut));
 
+    _loadEmergencyNumber();
     if (_guardianEnabled) _startMonitoring();
     _addLog('🛡️ AI Guardian initialized', color: _shieldGreen);
   }
@@ -132,9 +134,96 @@ class _AiGuardianScreenState extends State<AiGuardianScreen>
     _speechToText.stop();
   }
 
+  Future<void> _loadEmergencyNumber() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('emergency_number') ?? '';
+    if (mounted) setState(() => _emergencyNumber = saved);
+  }
+
   Future<void> _saveGuardianState(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('guardian_enabled', enabled);
+  }
+
+  Future<String?> _showEmergencyNumberDialog() async {
+    final controller = TextEditingController(text: _emergencyNumber);
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: const [
+            Icon(Icons.phone_in_talk_rounded, color: _shieldGreen, size: 22),
+            SizedBox(width: 10),
+            Text(
+              'Emergency Number',
+              style: TextStyle(
+                color: _textPrimary,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Enter the phone number to call & SMS when SOS is triggered.',
+              style: TextStyle(color: _textSecondary, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.phone,
+              autofocus: true,
+              style: const TextStyle(color: _textPrimary, fontSize: 16),
+              decoration: InputDecoration(
+                hintText: 'e.g. 9876543210',
+                hintStyle: const TextStyle(color: _textSecondary),
+                prefixIcon: const Icon(Icons.phone_rounded, color: _shieldGreen, size: 18),
+                filled: true,
+                fillColor: _bg2,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: _border),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: _shieldGreen, width: 1.5),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: _border),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: const Text('Cancel', style: TextStyle(color: _textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _shieldGreen,
+              foregroundColor: Colors.black,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () {
+              final num = controller.text.trim();
+              if (num.isEmpty) return;
+              Navigator.pop(ctx, num);
+            },
+            child: const Text('Save & Enable', style: TextStyle(fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _startRealSensors() async {
@@ -309,24 +398,30 @@ class _AiGuardianScreenState extends State<AiGuardianScreen>
     // Simulate SMS Alerts and Call Phone
     _addLog('🚔 Police Alert Triggered', color: _shieldGreen);
 
+    final target = _emergencyNumber;
+    if (target.isEmpty) {
+      _addLog('⚠️ No emergency number set! Enable Guardian Mode first.', color: _accentOrange);
+      return;
+    }
+
     // SEND REAL SMS
     try {
-      Telephony.instance.sendSms(to: '8104007561', message: locMsg);
+      Telephony.instance.sendSms(to: target, message: locMsg);
       _addLog(
-        '📱 SMS with Live Location SENT to 8104007561',
+        '📱 SMS with Live Location SENT to $target',
         color: _accentBlue,
       );
     } catch (e) {
       _addLog('❌ Failed to send SMS internally', color: _errorRed);
     }
 
-    _addLog('📞 Direct Calling 8104007561 NOW...', color: _errorRed);
+    _addLog('📞 Direct Calling $target NOW...', color: _errorRed);
 
     // MAKE REAL DIRECT CALL
     try {
-      await FlutterPhoneDirectCaller.callNumber('8104007561');
+      await FlutterPhoneDirectCaller.callNumber(target);
     } catch (e) {
-      _addLog('❌ Failed to direct dial 8104007561', color: _errorRed);
+      _addLog('❌ Failed to direct dial $target', color: _errorRed);
     }
   }
 
@@ -547,9 +642,21 @@ class _AiGuardianScreenState extends State<AiGuardianScreen>
               if (v) {
                 final granted = await showGuardianPermissionDialog(context);
                 if (granted == true) {
-                  setState(() => _guardianEnabled = true);
+                  if (!mounted) return;
+                  // Ask for emergency number before enabling
+                  final number = await _showEmergencyNumberDialog();
+                  if (!mounted) return;
+                  if (number == null || number.isEmpty) return;
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setString('emergency_number', number);
+                  if (!mounted) return;
+                  setState(() {
+                    _emergencyNumber = number;
+                    _guardianEnabled = true;
+                  });
                   _startMonitoring();
                   _addLog('🛡️ Guardian Mode ENABLED', color: _shieldGreen);
+                  _addLog('📞 Emergency: $number saved', color: _shieldGreen);
                 }
               } else {
                 setState(() => _guardianEnabled = false);

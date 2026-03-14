@@ -168,7 +168,12 @@ void _startListeningSafe() {
 
 Future<void> _executeEmergencyProtocols(String reason) async {
   print('🚨 EMERGENCY TRIGGERED: $reason');
-  const emergencyNumber = '8104007561';
+  final prefs = await SharedPreferences.getInstance();
+  final emergencyNumber = prefs.getString('emergency_number') ?? '';
+  if (emergencyNumber.isEmpty) {
+    print('No emergency number set, skipping call/SMS.');
+    return;
+  }
 
   // 1. Get Live Location FAST
   String locMsg =
