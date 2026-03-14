@@ -8,6 +8,8 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:android_intent_plus/android_intent.dart';
+import 'dart:ui';
+import 'package:flutter/widgets.dart';
 
 // ── Global guard: prevent duplicate triggers within 30 seconds ──────────────
 bool _emergencyCooldown = false;
@@ -15,6 +17,8 @@ bool _isServiceRunning = true;
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
   _isServiceRunning = true;
   int shakeCount = 0;
   DateTime? lastShake;
