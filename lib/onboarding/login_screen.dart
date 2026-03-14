@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'otp_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -68,7 +67,7 @@ class _LoginScreenState extends State<LoginScreen>
     super.dispose();
   }
 
-  // ── Firebase: Send OTP ────────────────────────────────────────────────────
+  // ── Dummy: Send OTP ───────────────────────────────────────────────────────
   Future<void> _sendOtp() async {
     if (_phoneController.text.length < 10) {
       _showSnack('Please enter a valid 10-digit mobile number');
@@ -77,47 +76,35 @@ class _LoginScreenState extends State<LoginScreen>
 
     setState(() => _isLoading = true);
 
-    await FirebaseAuth.instance.verifyPhoneNumber(
-      phoneNumber: '+91${_phoneController.text}',
-      verificationCompleted: (PhoneAuthCredential credential) async {
-        // Auto-verification on some devices
-        await FirebaseAuth.instance.signInWithCredential(credential);
-      },
-      verificationFailed: (FirebaseAuthException e) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        _showSnack(e.message ?? 'Verification failed. Please try again.');
-      },
-      codeSent: (String verificationId, int? resendToken) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        Navigator.push(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 500),
-            pageBuilder: (_, __, ___) => OtpScreen(
-              phoneNumber: _phoneController.text,
-              verificationId: verificationId,
+    // Simulate network delay
+    await Future.delayed(const Duration(seconds: 1));
+
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    Navigator.push(
+      context,
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 500),
+        pageBuilder: (_, __, ___) => OtpScreen(
+          phoneNumber: _phoneController.text,
+          verificationId: "dummy_id", // Dummy ID for dummy login
+        ),
+        transitionsBuilder: (_, animation, __, child) {
+          return SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(1, 0),
+              end: Offset.zero,
+            ).animate(
+              CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOutCubic,
+              ),
             ),
-            transitionsBuilder: (_, animation, __, child) {
-              return SlideTransition(
-                position:
-                    Tween<Offset>(
-                      begin: const Offset(1, 0),
-                      end: Offset.zero,
-                    ).animate(
-                      CurvedAnimation(
-                        parent: animation,
-                        curve: Curves.easeOutCubic,
-                      ),
-                    ),
-                child: child,
-              );
-            },
-          ),
-        );
-      },
-      codeAutoRetrievalTimeout: (String verificationId) {},
+            child: child,
+          );
+        },
+      ),
     );
   }
 

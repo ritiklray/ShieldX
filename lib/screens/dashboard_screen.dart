@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../onboarding/login_screen.dart';
@@ -594,7 +593,8 @@ class _DashboardScreenState extends State<DashboardScreen>
           const SizedBox(width: 8),
           IconButton(
             onPressed: () async {
-              await FirebaseAuth.instance.signOut();
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setBool('is_logged_in', false);
               if (context.mounted) {
                 Navigator.pushReplacement(
                   context,

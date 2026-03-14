@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../screens/ai_document_assistant_screen.dart';
 
 class OtpScreen extends StatefulWidget {
@@ -136,7 +136,7 @@ class _OtpScreenState extends State<OtpScreen>
   String get _fullOtp => _controllers.map((c) => c.text).join();
   bool get _isOtpComplete => _fullOtp.length == _otpLength;
 
-  // ── Firebase: Verify OTP ──────────────────────────────────────────────────
+  // ── Dummy: Verify OTP ─────────────────────────────────────────────────────
   Future<void> _verifyOtp() async {
     if (!_isOtpComplete) {
       setState(() {
@@ -151,56 +151,44 @@ class _OtpScreenState extends State<OtpScreen>
       _hasError = false;
     });
 
-    try {
-      final credential = PhoneAuthProvider.credential(
-        verificationId: widget.verificationId,
-        smsCode: _fullOtp,
-      );
+    // Simulate dummy verification (any 6 digits work)
+    await Future.delayed(const Duration(seconds: 1));
 
-      await FirebaseAuth.instance.signInWithCredential(credential);
+    if (!mounted) return;
 
-      if (!mounted) return;
+    // Save login state
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_logged_in', true);
 
-      setState(() {
-        _isVerifying = false;
-        _isSuccess = true;
-      });
+    setState(() {
+      _isVerifying = false;
+      _isSuccess = true;
+    });
 
-      await Future.delayed(const Duration(milliseconds: 1000));
-      if (!mounted) return;
+    await Future.delayed(const Duration(milliseconds: 1000));
+    if (!mounted) return;
 
-      Navigator.pushReplacement(
-        context,
-        PageRouteBuilder(
-          transitionDuration: const Duration(milliseconds: 600),
-          pageBuilder: (_, __, ___) => const AiDocumentAssistantScreen(),
-          transitionsBuilder: (_, animation, __, child) {
-            return FadeTransition(
-              opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
-              child: ScaleTransition(
-                scale: Tween<double>(begin: 0.96, end: 1.0).animate(
-                  CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                  ),
+    Navigator.pushReplacement(
+      context,
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 600),
+        pageBuilder: (_, __, ___) => const AiDocumentAssistantScreen(),
+        transitionsBuilder: (_, animation, __, child) {
+          return FadeTransition(
+            opacity: CurvedAnimation(parent: animation, curve: Curves.easeIn),
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.96, end: 1.0).animate(
+                CurvedAnimation(
+                  parent: animation,
+                  curve: Curves.easeOutCubic,
                 ),
-                child: child,
               ),
-            );
-          },
-        ),
-      );
-    } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isVerifying = false;
-        _hasError = true;
-        _errorMsg = e.message ?? 'Invalid OTP. Please try again.';
-        _isSuccess = false;
-      });
-      for (final c in _controllers) c.clear();
-      FocusScope.of(context).requestFocus(_focusNodes[0]);
-    }
+              child: child,
+            ),
+          );
+        },
+      ),
+    );
   }
 
   void _resendOtp() {
@@ -214,7 +202,7 @@ class _OtpScreenState extends State<OtpScreen>
     FocusScope.of(context).requestFocus(_focusNodes[0]);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: const Text('OTP resent successfully!'),
+        content: const Text('OTP resent successfully! (Dummy)'),
         backgroundColor: _cardBg,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -697,8 +685,8 @@ class _OtpScreenState extends State<OtpScreen>
               decoration: BoxDecoration(
                 color: isFilled
                     ? (_isSuccess
-                          ? _shieldGreen.withOpacity(0.12)
-                          : _accentBlue.withOpacity(0.12))
+                           ? _shieldGreen.withOpacity(0.12)
+                           : _accentBlue.withOpacity(0.12))
                     : _inputBg,
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(

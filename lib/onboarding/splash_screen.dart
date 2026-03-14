@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'login_screen.dart';
 import '../screens/dashboard_screen.dart';
 
@@ -100,33 +100,36 @@ class _SplashScreenState extends State<SplashScreen>
     });
 
     // Navigate after 3.5 s
-    Future.delayed(const Duration(milliseconds: 3500), () {
+    Future.delayed(const Duration(milliseconds: 3500), () async {
       if (mounted) {
-        final user = FirebaseAuth.instance.currentUser;
-        final Widget nextScreen = user != null
+        final prefs = await SharedPreferences.getInstance();
+        final isLoggedIn = prefs.getBool('is_logged_in') ?? false;
+
+        final Widget nextScreen = isLoggedIn
             ? const DashboardScreen()
             : const LoginScreen();
 
-        Navigator.pushReplacement(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 600),
-            pageBuilder: (_, __, ___) => nextScreen,
-            transitionsBuilder: (_, animation, __, child) {
-              return FadeTransition(
-                opacity: CurvedAnimation(
-                  parent: animation,
-                  curve: Curves.easeIn,
-                ),
-                child: child,
-              );
-            },
-          ),
-        );
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            PageRouteBuilder(
+              transitionDuration: const Duration(milliseconds: 600),
+              pageBuilder: (_, __, ___) => nextScreen,
+              transitionsBuilder: (_, animation, __, child) {
+                return FadeTransition(
+                  opacity: CurvedAnimation(
+                    parent: animation,
+                    curve: Curves.easeIn,
+                  ),
+                  child: child,
+                );
+              },
+            ),
+          );
+        }
       }
     });
   }
-
   @override
   void dispose() {
     _pulseController.dispose();
